@@ -1,0 +1,409 @@
+/* Agent Usage: redesigned menu for GNOME Shell 50 (dark shell theme).
+ * Every class is prefixed au-. Accent per tab comes from .au-claude / .au-codex on each tab page
+ * (and on the progress bar and footer for the active tab);
+ * status colours from .au-level-ok / -warn / -bad / -idle. Ring and bar colours are custom
+ * properties read by the cairo code in ui.js (-au-ring-*).
+ *
+ * Palette
+ *   ok    #57d98a   warn  #f6c453   bad  #ff6b6b   idle  white 40%
+ *   Claude coral   #ffc09f → #e0663c      Codex teal → indigo   #44e3c9 → #6a6ff5
+ */
+
+/* ---------- panel button ---------- */
+
+.au-panel-box { padding: 0 10px; }
+.au-panel-icon { icon-size: 1.091em; }
+.au-panel-badge {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  border: 1.5px solid #000000;
+  background-color: #f6c453;
+}
+.au-panel-badge.au-level-bad { background-color: #ff6b6b; }
+
+/* ---------- menu shell ---------- */
+
+.popup-menu-item.au-menu-item {
+  padding: 0;
+  spacing: 0;
+}
+
+.au-root {
+  width: 25em;
+  color: #ffffff; /* the inactive menu item is :insensitive (grey); set our own base colour */
+  padding: 6px 4px 4px 4px;
+}
+
+/* ---------- tabs (segmented control) ---------- */
+
+.au-tabs {
+  spacing: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background-color: rgba(0, 0, 0, 0.24);
+}
+
+.au-tab {
+  padding: 7px 10px;
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.66);
+  font-weight: 700;
+  transition-duration: 180ms;
+}
+.au-tab:hover { color: #ffffff; background-color: rgba(255, 255, 255, 0.07); }
+.au-tab:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35); }
+.au-tab:checked {
+  color: #ffffff;
+  background-gradient-direction: horizontal;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.au-tab-claude:checked { background-gradient-start: #ee9067; background-gradient-end: #cf5f3b; }
+.au-tab-codex:checked { background-gradient-start: #1fae9f; background-gradient-end: #545ee0; }
+
+.au-tab-inner { spacing: 8px; }
+.au-tab-icon { icon-size: 1.1em; }
+.au-tab-label { font-weight: 700; }
+.au-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+.au-tab-dot.au-level-warn { background-color: #f6c453; }
+.au-tab-dot.au-level-bad { background-color: #ff6b6b; }
+
+/* "updating…" shimmer under the tabs */
+.au-progress {
+  height: 2px;
+  margin: 5px 26px 5px 26px;
+}
+.au-progress.au-claude { -au-progress-color: #ff9d78; }
+.au-progress.au-codex { -au-progress-color: #4fe0cc; }
+
+/* ---------- content ---------- */
+
+.au-content { spacing: 12px; }
+
+/* overall health line */
+.au-banner {
+  spacing: 10px;
+  padding: 9px 12px 9px 13px;
+  border-radius: 12px;
+}
+.au-banner.au-level-ok { background-color: rgba(87, 217, 138, 0.11); }
+.au-banner.au-level-warn { background-color: rgba(246, 196, 83, 0.14); }
+.au-banner.au-level-bad { background-color: rgba(255, 107, 107, 0.16); }
+.au-banner-dot { width: 10px; height: 10px; border-radius: 5px; }
+.au-level-ok .au-banner-dot { background-color: #57d98a; box-shadow: 0 0 0 3px rgba(87, 217, 138, 0.22); }
+.au-level-warn .au-banner-dot { background-color: #f6c453; box-shadow: 0 0 0 3px rgba(246, 196, 83, 0.24); }
+.au-level-bad .au-banner-dot { background-color: #ff6b6b; box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.26); }
+.au-banner-text { font-weight: 700; font-size: 0.95em; }
+.au-banner.au-level-ok .au-banner-text { color: #c4f2d6; }
+.au-banner.au-level-warn .au-banner-text { color: #ffe6ad; }
+.au-banner.au-level-bad .au-banner-text { color: #ffc9c9; }
+.au-pips { spacing: 4px; }
+.au-pip { width: 6px; height: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.3); }
+.au-pip.au-level-ok { background-color: #57d98a; }
+.au-pip.au-level-warn { background-color: #f6c453; }
+.au-pip.au-level-bad { background-color: #ff6b6b; }
+.au-pip.au-level-idle { background-color: rgba(255, 255, 255, 0.28); }
+
+/* account header */
+.au-account { spacing: 12px; padding: 0 2px 0 4px; }
+.au-avatar {
+  width: 2.5em;
+  height: 2.5em;
+  border-radius: 999px;
+  background-gradient-direction: vertical;
+}
+.au-claude .au-avatar { background-gradient-start: #f6a580; background-gradient-end: #cf5f3b; }
+.au-codex .au-avatar { background-gradient-start: #2cc9b5; background-gradient-end: #5560e2; }
+.au-root .au-avatar.au-avatar-off {
+  background-gradient-direction: none;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+.au-avatar-icon { icon-size: 1.3em; color: #ffffff; }
+.au-avatar-off .au-avatar-icon { color: rgba(255, 255, 255, 0.55); }
+.au-account-text { spacing: 3px; }
+.au-account-name { font-weight: 700; }
+.au-account-meta { spacing: 7px; }
+.au-plan {
+  font-size: 0.72em;
+  font-weight: 800;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+.au-claude .au-plan { color: #ffc6ad; background-color: rgba(232, 132, 95, 0.22); }
+.au-codex .au-plan { color: #a6f0e6; background-color: rgba(47, 200, 181, 0.2); }
+.au-account-sub { font-size: 0.8em; color: rgba(255, 255, 255, 0.55); }
+
+/* buttons */
+.au-button {
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 0.86em;
+  font-weight: 700;
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.09);
+  transition-duration: 120ms;
+}
+.au-button:hover { background-color: rgba(255, 255, 255, 0.16); }
+.au-button:active { background-color: rgba(255, 255, 255, 0.22); }
+.au-button:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.4); }
+.au-button-accent { background-gradient-direction: horizontal; }
+.au-claude .au-button-accent { background-gradient-start: #ee9067; background-gradient-end: #cf5f3b; }
+.au-codex .au-button-accent { background-gradient-start: #1fae9f; background-gradient-end: #545ee0; }
+
+/* sections and cards */
+.au-section { spacing: 7px; }
+.au-section-head { padding: 0 4px; }
+.au-section-title { font-size: 0.8em; font-weight: 800; color: rgba(255, 255, 255, 0.55); }
+.au-section-aside { font-size: 0.78em; color: rgba(255, 255, 255, 0.4); }
+.au-card {
+  spacing: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background-color: rgba(255, 255, 255, 0.045);
+}
+.au-muted { font-size: 0.85em; color: rgba(255, 255, 255, 0.5); padding: 0 4px; }
+
+/* ---------- gauges ---------- */
+
+.au-ring-xl { width: 6.6em; height: 6.6em; }
+.au-ring-lg { width: 5.6em; height: 5.6em; }
+.au-ring-md { width: 4.8em; height: 4.8em; }
+
+.au-ring,
+.au-bar {
+  -au-ring-track: rgba(255, 255, 255, 0.09);
+  -au-ring-pace: rgba(255, 255, 255, 0.92);
+  -au-ring-thickness: 0.105;
+}
+.au-claude .au-ring,
+.au-claude .au-bar { -au-ring-from: #ffc09f; -au-ring-to: #e0663c; }
+.au-codex .au-ring,
+.au-codex .au-bar { -au-ring-from: #44e3c9; -au-ring-to: #6a6ff5; }
+.au-root .au-ring.au-level-warn,
+.au-root .au-bar.au-level-warn { -au-ring-from: #ffe49a; -au-ring-to: #f39c26; }
+.au-root .au-ring.au-level-bad,
+.au-root .au-bar.au-level-bad { -au-ring-from: #ff9e8f; -au-ring-to: #ec3750; }
+.au-root .au-ring.au-skel-ring { -au-ring-track: rgba(255, 255, 255, 0.07); }
+
+.au-ring-center { spacing: 0; }
+.au-ring-pct { font-weight: 800; font-feature-settings: "tnum"; }
+.au-ring-xl-stack .au-ring-pct { font-size: 1.6em; }
+.au-ring-lg-stack .au-ring-pct { font-size: 1.32em; }
+.au-ring-md-stack .au-ring-pct { font-size: 1.12em; }
+.au-ring-xl-stack .au-ring-pct-wide { font-size: 1.38em; }
+.au-ring-lg-stack .au-ring-pct-wide { font-size: 1.12em; }
+.au-ring-md-stack .au-ring-pct-wide { font-size: 0.96em; }
+.au-ring-unit { font-size: 0.68em; font-weight: 600; color: rgba(255, 255, 255, 0.5); }
+.au-ring-md-stack .au-ring-unit { font-size: 0.62em; }
+.au-ring-stack.au-level-warn .au-ring-pct { color: #ffd88a; }
+.au-ring-stack.au-level-bad .au-ring-pct { color: #ffa0a0; }
+
+.au-gauge-hero { spacing: 18px; padding: 0 2px; }
+.au-gauge-info { spacing: 3px; }
+.au-gauge-title { spacing: 8px; }
+.au-gauge-label { font-size: 1.05em; font-weight: 800; }
+.au-gauge-label-sm { font-size: 0.88em; padding-top: 5px; }
+.au-gauge-reset { font-weight: 600; color: rgba(255, 255, 255, 0.9); font-feature-settings: "tnum"; }
+.au-gauge-when { font-size: 0.8em; color: rgba(255, 255, 255, 0.5); font-feature-settings: "tnum"; }
+.au-gauge-pace { font-size: 0.8em; font-weight: 600; }
+.au-gauge-pace.au-level-ok { color: rgba(143, 232, 177, 0.85); }
+.au-gauge-pace.au-level-warn { color: #f6c453; }
+.au-gauge-grid { spacing: 14px; }
+.au-gauge-row { spacing: 8px; }
+.au-gauge-col { spacing: 2px; }
+.au-gauge-reset-sm { font-size: 0.78em; color: rgba(255, 255, 255, 0.55); font-feature-settings: "tnum"; }
+.au-gauge-pace-sm { font-size: 0.74em; font-weight: 700; }
+.au-gauge-pace-sm.au-level-warn { color: #f6c453; }
+.au-gauge-pace-sm.au-level-bad { color: #ff8f8f; }
+
+.au-tag { font-size: 0.7em; font-weight: 800; padding: 1px 7px; border-radius: 999px; }
+.au-tag.au-level-warn { color: #ffd88a; background-color: rgba(246, 196, 83, 0.18); }
+.au-tag.au-level-bad { color: #ffb0b0; background-color: rgba(255, 107, 107, 0.2); }
+
+/* extra-usage bar and credits line */
+.au-extra { spacing: 10px; padding: 0 2px; }
+.au-extra-label { font-size: 0.85em; color: rgba(255, 255, 255, 0.7); }
+.au-extra-value { font-size: 0.85em; font-weight: 700; font-feature-settings: "tnum"; }
+.au-bar { height: 6px; }
+
+/* inline notices (signed out, API error, no windows, limit reached) */
+.au-notice { spacing: 12px; padding: 10px 12px; border-radius: 12px; }
+.au-notice.au-level-warn { background-color: rgba(246, 196, 83, 0.1); }
+.au-notice.au-level-bad { background-color: rgba(255, 107, 107, 0.12); }
+.au-notice.au-level-idle { background-color: rgba(255, 255, 255, 0.04); }
+.au-notice-icon { icon-size: 1.25em; color: rgba(255, 255, 255, 0.6); }
+.au-notice.au-level-warn .au-notice-icon { color: #f6c453; }
+.au-notice.au-level-bad .au-notice-icon { color: #ff8f8f; }
+.au-notice-body { spacing: 2px; }
+.au-notice-title { font-size: 0.92em; font-weight: 700; }
+.au-notice-text { font-size: 0.82em; color: rgba(255, 255, 255, 0.65); }
+
+/* ---------- tokens ---------- */
+
+.au-tiles { spacing: 8px; }
+.au-tile {
+  spacing: 1px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background-color: rgba(255, 255, 255, 0.045);
+}
+.au-tile-value { font-size: 1.3em; font-weight: 800; font-feature-settings: "tnum"; }
+.au-claude .au-tile-value { color: #ffe0d2; }
+.au-codex .au-tile-value { color: #d4f7f2; }
+.au-tile-caption { font-size: 0.75em; color: rgba(255, 255, 255, 0.5); }
+
+/* ---------- remote access ---------- */
+
+.au-remote { spacing: 0; padding: 4px 14px; }
+.au-row {
+  spacing: 12px;
+  padding: 9px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.au-row:first-child { border-top-width: 0; }
+.au-row-icon { icon-size: 1.15em; color: rgba(255, 255, 255, 0.6); }
+.au-row.au-level-warn .au-row-icon { color: #f6c453; }
+.au-row.au-level-bad .au-row-icon { color: #ff8f8f; }
+.au-row-text { spacing: 1px; }
+.au-row-name { font-size: 0.92em; font-weight: 700; }
+.au-row-detail { font-size: 0.8em; color: rgba(255, 255, 255, 0.55); }
+.au-row-item { font-size: 0.78em; color: rgba(255, 255, 255, 0.45); padding-left: 2px; }
+
+.au-chip {
+  spacing: 6px;
+  min-width: 4.6em;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.au-chip-dot { width: 7px; height: 7px; border-radius: 4px; }
+.au-chip-label { font-size: 0.74em; font-weight: 800; }
+.au-chip.au-level-ok { color: #93e9b4; background-color: rgba(87, 217, 138, 0.14); }
+.au-chip.au-level-ok .au-chip-dot { background-color: #57d98a; }
+.au-chip.au-level-warn { color: #ffd88a; background-color: rgba(246, 196, 83, 0.16); }
+.au-chip.au-level-warn .au-chip-dot { background-color: #f6c453; }
+.au-chip.au-level-bad { color: #ffaeae; background-color: rgba(255, 107, 107, 0.18); }
+.au-chip.au-level-bad .au-chip-dot { background-color: #ff6b6b; }
+.au-chip.au-level-idle { color: rgba(255, 255, 255, 0.6); background-color: rgba(255, 255, 255, 0.07); }
+.au-chip.au-level-idle .au-chip-dot { background-color: rgba(255, 255, 255, 0.35); }
+
+.au-link {
+  margin: 2px 0 10px 0;
+  padding: 7px 12px;
+  border-radius: 10px;
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.06);
+  transition-duration: 120ms;
+}
+.au-link:hover { background-color: rgba(255, 255, 255, 0.12); }
+.au-link:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35); }
+.au-link-inner { spacing: 8px; }
+.au-link-icon { icon-size: 1em; }
+.au-link-label { font-size: 0.85em; font-weight: 700; }
+
+/* ---------- footer ---------- */
+
+.au-footer { spacing: 8px; padding: 12px 4px 2px 8px; }
+.au-footer-status { font-size: 0.8em; color: rgba(255, 255, 255, 0.5); font-feature-settings: "tnum"; }
+.au-footer-status.au-footer-busy { color: rgba(255, 255, 255, 0.78); }
+.au-claude .au-footer-status.au-footer-busy { color: #ffb699; }
+.au-codex .au-footer-status.au-footer-busy { color: #7fe6d6; }
+.au-footer-status.au-footer-warn { color: #f6c453; }
+
+.au-refresh {
+  padding: 5px 14px 5px 11px;
+  border-radius: 999px;
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.08);
+  transition-duration: 120ms;
+}
+.au-refresh:hover { background-color: rgba(255, 255, 255, 0.15); }
+.au-refresh:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35); }
+.au-refresh:insensitive { color: rgba(255, 255, 255, 0.6); background-color: rgba(255, 255, 255, 0.05); }
+.au-refresh-inner { spacing: 7px; }
+.au-refresh-icon { icon-size: 1em; }
+.au-refresh-label { font-size: 0.85em; font-weight: 700; }
+
+/* ---------- first-open skeleton ---------- */
+
+.au-skeleton { spacing: 12px; }
+.au-skel { border-radius: 8px; background-color: rgba(255, 255, 255, 0.07); }
+.au-skel-banner { height: 2.4em; border-radius: 12px; }
+.au-skel-avatar { width: 2.5em; height: 2.5em; border-radius: 999px; }
+.au-skel-lines { spacing: 7px; }
+.au-skel-line-lg { width: 12em; height: 0.85em; }
+.au-skel-line-md { width: 9em; height: 0.8em; }
+.au-skel-line-sm { width: 6em; height: 0.65em; }
+.au-skel-line-xs { width: 4.5em; height: 0.65em; margin-top: 8px; }
+.au-skel-button { width: 5em; height: 1.9em; border-radius: 999px; }
+.au-skel-title { width: 5.5em; height: 0.7em; margin-left: 4px; }
+.au-skel-tile { height: 3.6em; border-radius: 14px; }
+.au-skel-dot { width: 1.15em; height: 1.15em; border-radius: 999px; }
+.au-skel-chip { width: 4.6em; height: 1.45em; border-radius: 999px; }
+
+/* ---------- collector failed and there is no snapshot yet ---------- */
+
+.au-empty {
+  spacing: 8px;
+  padding: 22px 18px;
+  border-radius: 16px;
+  background-color: rgba(255, 107, 107, 0.08);
+}
+.au-empty-icon { icon-size: 2.2em; color: #f6c453; }
+.au-empty-title { font-size: 1.05em; font-weight: 800; }
+.au-empty-text { font-size: 0.85em; color: rgba(255, 255, 255, 0.65); text-align: center; }
+
+/* ---------- v3: streamed parts, today's history, fix buttons ---------- */
+
+/* a section whose data is still on its way (shown with its saved values, dimmed by ui.js) */
+.au-section-aside.au-section-busy { font-style: italic; }
+.au-claude .au-section-busy { color: #ffb699; }
+.au-codex .au-section-busy { color: #7fe6d6; }
+
+/* today's timeline of a worker: midnight → now, up-time in the tab accent, a dot per incident */
+.au-history { spacing: 3px; padding-top: 5px; }
+.au-history-text { font-size: 0.76em; color: rgba(255, 255, 255, 0.55); font-feature-settings: "tnum"; }
+.au-timeline {
+  height: 10px;
+  -au-ring-track: rgba(255, 255, 255, 0.08);
+  -au-mark-warn: #f6c453;
+  -au-mark-bad: #ff6b6b;
+  -au-mark-edge: #2b2b30;
+}
+.au-claude .au-timeline { -au-ring-from: #ffc09f; -au-ring-to: #e0663c; }
+.au-codex .au-timeline { -au-ring-from: #44e3c9; -au-ring-to: #6a6ff5; }
+.au-timeline-axis { padding: 0 1px; }
+.au-timeline-tick { font-size: 0.62em; color: rgba(255, 255, 255, 0.3); font-feature-settings: "tnum"; }
+
+/* fix buttons inside a worker row (two-step ones turn amber when armed) */
+.au-row-action {
+  margin-top: 7px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  font-weight: 800;
+  color: #ffffff;
+  transition-duration: 120ms;
+}
+.au-claude .au-row-action { background-color: rgba(232, 132, 95, 0.3); }
+.au-claude .au-row-action:hover { background-color: rgba(232, 132, 95, 0.45); }
+.au-codex .au-row-action { background-color: rgba(47, 200, 181, 0.28); }
+.au-codex .au-row-action:hover { background-color: rgba(47, 200, 181, 0.42); }
+.au-root .au-row-action.au-row-action-armed { color: #ffe1a0; background-color: rgba(246, 196, 83, 0.26); }
+.au-row-action:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.4); }
+.au-root .au-row-action:insensitive { color: rgba(255, 255, 255, 0.5); background-color: rgba(255, 255, 255, 0.07); }
+
+/* open link + copy button */
+.au-link-row { spacing: 6px; margin: 2px 0 10px 0; }
+.au-link-row .au-link { margin: 0; }
+.au-link-copy { padding: 7px 11px; }
+.au-link-copy.au-link-copied { color: #93e9b4; background-color: rgba(87, 217, 138, 0.16); }
+
+.au-footer-status.au-footer-ok { color: #93e9b4; }
+.au-action-box { spacing: 3px; }
+.au-action-error { font-size: 0.76em; color: #ffaeae; padding-left: 2px; }

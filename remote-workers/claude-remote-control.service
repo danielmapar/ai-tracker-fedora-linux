@@ -1,0 +1,20 @@
+[Unit]
+Description=Claude Code Remote Control server: start sessions on this computer from your phone or claude.ai/code
+# Sessions started from the phone or the web open in WorkingDirectory. Set your own directory (and
+# anything else) in a drop-in, which survives reinstalls:
+#   systemctl --user edit claude-remote-control.service
+#   [Service]
+#   WorkingDirectory=%h/projects/my-project
+# Security: while this runs, anyone signed in to your Claude account can run Claude Code here.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/claude remote-control --no-create-session-in-dir --remote-control-session-name-prefix %H
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

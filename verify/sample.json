@@ -1,0 +1,89 @@
+{
+  "claude": {
+    "account": {
+      "auth_method": "claude.ai",
+      "email": "user@example.com",
+      "logged_in": true,
+      "org": "user@example.com",
+      "plan": "pro"
+    },
+    "tokens": {
+      "source": "local transcripts on this computer",
+      "today_output": 940000,
+      "today_total": 182000000,
+      "today_uncached_input": 2100
+    },
+    "usage": {
+      "extra_usage": null,
+      "windows": [
+        {
+          "label": "Weekly",
+          "pct": 24.0,
+          "resets_at": 1767571200
+        }
+      ]
+    },
+    "workers": {
+      "auto_connect": true,
+      "server": {
+        "capacity": "2/32",
+        "link": "https://claude.ai/code?environment=env_EXAMPLE",
+        "service_active": true,
+        "sessions": [
+          "Refactor auth flow",
+          "Fix flaky tests"
+        ],
+        "state": "Connected"
+      },
+      "sessions": {
+        "connected": 2,
+        "not_connected": [],
+        "total": 2
+      }
+    }
+  },
+  "codex": {
+    "account": {
+      "email": "user@example.com",
+      "logged_in": true,
+      "plan": "plus",
+      "type": "chatgpt"
+    },
+    "tokens": {
+      "last_7_days": 152000000,
+      "lifetime": 1840000000,
+      "today": 24500000
+    },
+    "usage": {
+      "credits": "500",
+      "limit_reached": null,
+      "windows": [
+        {
+          "label": "Weekly",
+          "pct": 11.0,
+          "resets_at": 1767484800
+        }
+      ]
+    },
+    "workers": {
+      "service": {
+        "relay": {
+          "name": "my-laptop",
+          "status": "connected"
+        },
+        "running": true
+      },
+      "ssh": {
+        "active": true
+      },
+      "stray_servers": 0,
+      "watchdog": {
+        "last_message": "background service is back",
+        "last_ok": true,
+        "last_run": 1767225300,
+        "timer_active": true
+      }
+    }
+  },
+  "generated_at": 1767225600
+}

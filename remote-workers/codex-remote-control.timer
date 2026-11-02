@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Codex background service every minute (and at boot)
+
+[Timer]
+OnStartupSec=20s
+OnCalendar=minutely
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

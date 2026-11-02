@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Keep the Codex background service running and connected to the ChatGPT relay, so your phone
+# can reach this computer.
+# Run every minute by codex-remote-control.timer.
+#   - If the managed service is not running (e.g. it crashed), start it with remote control on.
+#   - If an SSH client (e.g. the Codex desktop app's SSH connection, which runs
+#     `codex app-server proxy`) started its own unmanaged server, which blocks the managed one,
+#     replace it.
+#   - If the service runs but stays disconnected from the relay for 3 checks, restart it.
+# Anything that launches the service runs in its own systemd scope: this watchdog is a short-lived
+# unit, and systemd would otherwise kill the service together with it when the check finishes.
+set -u
+CODEX="$HOME/.local/bin/codex"
+MANAGED="$HOME/.codex/packages/app-server-daemon/"
+# Private per-user runtime dir only (never a shared /tmp): the file holds a counter.
+STATE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set; run this from the systemd user timer}/codex-remote-control-watchdog.misses"
+ME=$(id -u)
+
+detached() { systemd-run --user --scope --quiet --collect -- "$@"; }
+
+managed_running() {
+    for p in $(pgrep -u "$ME" -f 'app-server --remote-control'); do
+        case "$(readlink -f "/proc/$p/exe" 2>/dev/null)" in "$MANAGED"*) return 0 ;; esac
+    done
+    return 1
+}
+
+# Unmanaged app-servers: only your own processes, and only real Codex binaries (an executable
+# named `codex`), so a grep, strace, editor or shell that mentions the same words is never touched.
+stray_servers() {
+    for p in $(pgrep -u "$ME" -f 'app-server --listen unix://'); do
+        exe=$(readlink -f "/proc/$p/exe" 2>/dev/null) || continue
+        case "$exe" in
+            "$MANAGED"*) ;;
+            */codex) echo "$p" ;;
+        esac
+    done
+}
+
+status_of() {
+    printf '%s' "$1" | python3 -I -c 'import json,sys
+try: print(json.load(sys.stdin).get("status") or "unknown")
+except Exception: print("unknown")'
+}
+
+if ! managed_running; then
+    strays=$(stray_servers)
+    if [ -n "$strays" ]; then
+        echo "unmanaged app-server ($strays) is blocking the background service; replacing it"
+        kill -TERM $strays 2>/dev/null
+        sleep 2
+        detached "$CODEX" app-server daemon bootstrap --remote-control >/dev/null 2>&1 || echo "bootstrap failed"
+    else
+        echo "background service not running; starting it"
+        detached "$CODEX" remote-control start --json >/dev/null 2>&1 || echo "start failed"
+    fi
+    sleep 2
+    managed_running && echo "background service is back" || echo "background service still not running"
+    rm -f "$STATE"
+    exit 0
+fi
+
+# Running: check the relay connection (does not launch anything when the service is up).
+status=$(status_of "$(timeout 20 "$CODEX" remote-control start --json 2>/dev/null | tail -n 1)")
+if [ "$status" = "connected" ]; then
+    [ -f "$STATE" ] && { echo "connected again"; rm -f "$STATE"; }
+    exit 0
+fi
+# The counter is read as plain digits only (never evaluated as shell arithmetic).
+misses=$(cat "$STATE" 2>/dev/null || true)
+case $misses in '' | *[!0-9]*) misses=0 ;; esac
+misses=$((10#$misses + 1))
+echo "relay status=$status (miss $misses of 3)"
+if [ "$misses" -ge 3 ]; then
+    echo "restarting background service"
+    detached "$CODEX" app-server daemon restart >/dev/null 2>&1 || echo "restart failed"
+    rm -f "$STATE"
+else
+    echo "$misses" > "$STATE"
+fi

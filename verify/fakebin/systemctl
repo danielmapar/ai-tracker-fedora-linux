@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sandbox stand-in: records the fix command instead of touching any real service.
+echo "systemctl $*" >> "$HOME/scenarios/actions.log"
+sleep 0.5
+if [ -f "$HOME/scenarios/action-fail" ]; then echo "Failed to restart unit: simulated failure" >&2; exit 1; fi
+exit 0

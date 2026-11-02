@@ -1,0 +1,7 @@
+{
+  "uuid": "ai-tracker@danielmapar",
+  "name": "AI Tracker",
+  "description": "Claude Code and Codex plan usage plus the health of this computer's remote-access services. Fetches only when you open it. Needs the agent-usage collector from the project page.",
+  "url": "https://github.com/danielmapar/ai-tracker-fedora-linux",
+  "shell-version": ["50"]
+}

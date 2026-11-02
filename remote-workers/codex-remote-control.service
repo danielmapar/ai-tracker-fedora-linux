@@ -1,0 +1,8 @@
+[Unit]
+Description=Keep the Codex background service running and connected for your phone
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/codex-remote-control-watchdog
+# A check takes seconds; never let a hung one block the timer (and the widget's fix buttons).
+TimeoutStartSec=120

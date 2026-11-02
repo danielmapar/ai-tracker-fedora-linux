@@ -1,0 +1,24 @@
+[package]
+name = "agent-usage"
+version = "0.1.0"
+edition = "2021"
+description = "On-demand Claude/Codex usage and remote-access status for a GNOME top-bar widget"
+license = "MIT"
+repository = "https://github.com/danielmapar/ai-tracker-fedora-linux"
+rust-version = "1.88"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+# Already in the dependency tree (serde_json, ring): local time zone rules and fast substring search.
+libc = "0.2"
+memchr = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,18 @@
+# build and test output
+/collector/target/
+/verify/out/
+/verify/out-demo/
+# builds install.sh writes next to the extension (if the extension dir is a symlink to this checkout)
+/extension/*/ui-*.js
+/extension/*/ui-current
+# local settings and secrets
+.env
+.env.*
+.claude/settings.local.json
+# editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+*.tmp
+*.bak
