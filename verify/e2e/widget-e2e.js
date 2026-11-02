@@ -13,6 +13,8 @@ import Shell from 'gi://Shell';
 import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 
 const HOME = GLib.get_home_dir();
 const SC = `${HOME}/scenarios`;
@@ -114,6 +116,13 @@ function runCommand(argv) {
 }
 
 const clipboardText = () => new Promise(r => St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_c, t) => r(t)));
+
+// What the AI Tracker app does to open the menu: a real D-Bus call from another process.
+const appOpen = () => runCommand(['gdbus', 'call', '--session', '--dest', 'org.gnome.Shell',
+    '--object-path', '/io/github/danielmapar/AiTracker', '--method', 'io.github.danielmapar.AiTracker.Open']);
+// Our widgets in the top bar (any build, or the old "Agent Usage" extension's).
+const widgetsInPanel = () => Object.values(Main.panel.statusArea)
+    .filter(a => a.constructor.name === 'AgentUsageIndicator' || a.accessible_name === 'Agent Usage').length;
 
 // ---------- the suite ----------
 
@@ -782,6 +791,81 @@ function defineTests(ext) {
         c.expectText(/Remote access status unknown/);
     });
 
+    // ---------------- quit, and the AI Tracker app ----------------
+    test('App', 'the footer has a Quit button', async c => {
+        await c.show('healthy');
+        const b = c.button(/Quit AI Tracker/);
+        ok(b && b.visible, 'no visible Quit button');
+        eq(widgetsInPanel(), 1, 'widgets in the top bar');
+    });
+
+    test('App', 'Quit closes the menu, says how to open it again, and turns the extension off', async c => {
+        await c.show('healthy');
+        const em = Main.extensionManager;
+        const disabled = [], notes = [];
+        em.disableExtension = uuid => { disabled.push(uuid); return true; }; // the real one would end the tests
+        const tray = MessageTray.getSystemSource();
+        const id = tray.connect('notification-added', (_s, n) => notes.push(`${n.title} | ${n.body}`));
+        try {
+            const b = c.button(/Quit AI Tracker/);
+            ok(b, 'no Quit button');
+            b.emit('clicked', 1);
+            ok(!c.ind.menu.isOpen, 'menu still open after Quit');
+            eq(disabled.length, 0, 'turned off during the click (it must wait until the click is over)');
+            await waitFor(() => disabled.length > 0, 'the extension to be turned off', 3000);
+        } finally {
+            delete em.disableExtension;
+            tray.disconnect(id);
+        }
+        eq(JSON.stringify(disabled), JSON.stringify([ext.uuid]), 'extensions turned off');
+        ok(/^AI Tracker quit \| .*search for AI Tracker/.test(notes[0] ?? ''), `notification: ${notes[0]}`);
+    });
+
+    test('App', 'the app opens the menu: like a click, one collector run, and nothing more if already open', async c => {
+        c.close();
+        await c.idle();
+        scenario('healthy');
+        const before = runs();
+        const r = await appOpen();
+        eq(r.status, 0, `Open over D-Bus: ${r.out}`);
+        await waitFor(() => c.ind.menu.isOpen, 'the menu to open');
+        await c.idle();
+        eq(runs() - before, 1, 'collector runs');
+        const again = await appOpen();
+        eq(again.status, 0, 'second Open');
+        await sleep(400);
+        ok(c.ind.menu.isOpen, 'menu closed by a second Open');
+        eq(runs() - before, 1, 'collector runs after a second Open');
+    });
+
+    test('App', 'opened from Activities: the menu opens once the overview has closed', async c => {
+        c.close();
+        await c.idle();
+        scenario('healthy');
+        Main.overview.show();
+        await waitFor(() => Main.overview.visible && !Main.overview.animationInProgress, 'the overview to show');
+        try {
+            await appOpen();
+            await sleep(400);
+            ok(!c.ind.menu.isOpen, 'menu opened behind the overview');
+        } finally {
+            Main.overview.hide();
+        }
+        await waitFor(() => c.ind.menu.isOpen, 'the menu after the overview closed', 5000);
+        await c.idle();
+    });
+
+    test('App', 'the real ai-tracker command opens the running widget without a second copy', async c => {
+        c.close();
+        await c.idle();
+        scenario('healthy');
+        const r = await runCommand(['env', `AI_TRACKER_UUID=${ext.uuid}`, `${HOME}/.local/bin/ai-tracker`]);
+        eq(r.status, 0, `ai-tracker: ${r.out}`);
+        await waitFor(() => c.ind.menu.isOpen, 'the menu to open');
+        eq(widgetsInPanel(), 1, 'widgets in the top bar');
+        await c.idle();
+    });
+
     // ---------------- the real collector's output ----------------
     test('Contract', 'the real collector\'s output (made-up fixture data) is drawn correctly', async c => {
         if (!exists(`${SC}/real-collector.stream`))
@@ -836,6 +920,8 @@ function defineTests(ext) {
         c.ind.destroy();
         await sleep(800);
         ok(!exists(`/proc/${pid}`), 'collector still running after destroy');
+        const gone = await appOpen();
+        ok(gone.status !== 0, 'the app link outlived the widget');
         ext.ind = await ext._load('?v=2');
         await sleep(500);
     });
@@ -844,6 +930,47 @@ function defineTests(ext) {
         ok(c.ind && c.ind.menu, 'indicator from a re-imported module');
         await c.show('healthy');
         c.expectText(/user@example\.com/);
+    });
+
+    test('Lifecycle', 'a new widget removes leftover copies: one in the top bar, and the app reaches it', async c => {
+        const previous = c.ind;
+        const gone = new Set();
+        const oldExtension = new PanelMenu.Button(0.5, 'Agent Usage', false); // the old extension's widget
+        Main.panel.addToStatusArea('agent-usage@sigtunnel', oldExtension);
+        oldExtension.connect('destroy', () => gone.add('old extension'));
+        const loose = new PanelMenu.Button(0.5, 'Agent Usage', false); // in the top bar, but not registered
+        const looseBox = loose.container;
+        Main.panel._rightBox.insert_child_at_index(looseBox, 0);
+        loose.connect('destroy', () => gone.add('loose'));
+        const owned = new PanelMenu.Button(0.5, 'Agent Usage', false); // a running extension's own: left alone
+        Main.panel.addToStatusArea('e2e-owner@test', owned);
+        const other = new PanelMenu.Button(0.5, 'Something else', false); // not ours: left alone
+        Main.panel.addToStatusArea('e2e-other@test', other);
+        const em = Main.extensionManager;
+        em.lookup = uuid => uuid === 'e2e-owner@test' ? {state: 1} : Object.getPrototypeOf(em).lookup.call(em, uuid);
+        try {
+            ext.ind = await ext._load('?v=leftover'); // a new widget while the previous one is still there
+        } finally {
+            delete em.lookup;
+        }
+        await sleep(300);
+        try {
+            ok(previous._destroyed, 'the previous copy is still there');
+            ok(gone.has('old extension') && !Main.panel.statusArea['agent-usage@sigtunnel'], 'the old extension\'s copy is still there');
+            // (identity checks only: touching a destroyed actor is itself an error)
+            ok(gone.has('loose') && !Main.panel._rightBox.get_children().includes(looseBox), 'an unregistered copy in the top bar is still there');
+            ok(Main.panel.statusArea['e2e-owner@test'] === owned, 'a running extension\'s own widget was removed');
+            ok(Main.panel.statusArea['e2e-other@test'] === other, 'an unrelated button was removed');
+        } finally {
+            owned.destroy();
+            other.destroy();
+        }
+        eq(widgetsInPanel(), 1, 'widgets in the top bar');
+        scenario('healthy');
+        const r = await appOpen();
+        eq(r.status, 0, `Open over D-Bus: ${r.out}`);
+        await waitFor(() => c.ind.menu.isOpen, 'the new copy\'s menu');
+        await c.idle();
     });
 
     test('Lifecycle', 'no saved snapshot: no dot at login, skeletons on the first open', async c => {

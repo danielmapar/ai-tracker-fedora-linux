@@ -4,8 +4,9 @@
 #   1. collector unit tests            (cargo test)
 #   2. collector end-to-end            (real binary, fake HOME / systemd / journal / Codex service)
 #   3. Codex watchdog                  (fake Codex, fake databases, stand-in service)
-#   4. widget end-to-end               (real GNOME Shell, headless; includes the real collector's output)
-#   5. widget visual walk-through      (screenshots of every state, verify/out/)
+#   4. AI Tracker app                  (open / quit script, fake GNOME Shell D-Bus)
+#   5. widget end-to-end               (real GNOME Shell, headless; includes the real collector's output)
+#   6. widget visual walk-through      (screenshots of every state, verify/out/)
 set -u
 V=$(cd "$(dirname "$0")" && pwd)
 R=$(dirname "$V")
@@ -24,6 +25,7 @@ step "collector unit tests" "$CARGO" test --release --quiet --manifest-path "$R/
 step "collector build" "$CARGO" build --release --quiet --manifest-path "$R/collector/Cargo.toml"
 step "collector end-to-end" python3 -I "$V/e2e/collector_e2e.py" --out "$EXTRA"
 step "Codex watchdog" bash "$V/watchdog-test.sh"
+step "AI Tracker app" bash "$V/app-test.sh"
 step "widget end-to-end" sh "$V/e2e.sh" "$EXTRA"
 visual() { sh "$V/run.sh" | tee "$EXTRA/visual.txt"; grep -q '^result: ok' "$EXTRA/visual.txt" && ! grep -q '^FAIL' "$V/out/checks.txt"; }
 step "widget visual walk-through" visual

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=AI Tracker
+GenericName=Usage Monitor
+Comment=Claude Code and Codex usage and remote access, in the top bar
+Exec="@BIN@/ai-tracker"
+Icon=io.github.danielmapar.AiTracker
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+Keywords=Claude;Codex;usage;limits;tokens;AI;
+Actions=quit;
+
+[Desktop Action quit]
+Name=Quit
+Exec="@BIN@/ai-tracker" --quit

@@ -13,6 +13,9 @@
 // written by the collector) is read once from disk, so the badge and the first open are instant.
 // The only timers are UI timers: a 30 s countdown-text tick while the menu is open, a watchdog
 // that force-exits a hung collector, and short one-shot timers for button feedback.
+// Quit (footer) turns the extension off; the AI Tracker app (app/ai-tracker) turns it back on and
+// opens the menu through a small D-Bus object. GNOME runs one copy of an extension, and a new
+// widget removes any copy an earlier build left in the top bar.
 
 import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
@@ -22,6 +25,9 @@ import Gio from 'gi://Gio';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
 
+import {ExtensionState} from 'resource:///org/gnome/shell/misc/extensionUtils.js';
+import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
@@ -42,6 +48,15 @@ const CODEX_TIMER = 'codex-remote-control.timer';
 // Unique GType names per module instance, so a loader that re-imports this file (cache-busting
 // URL after an update) never hits "type name already registered".
 const UID = GLib.uuid_string_random().replaceAll('-', '').slice(0, 12);
+
+// The "AI Tracker" app (app/ai-tracker) opens the menu through this object on GNOME Shell's own
+// session-bus connection. It can only open the menu, exactly like a click on the icon.
+const APP_DBUS_PATH = '/io/github/danielmapar/AiTracker';
+const APP_DBUS_XML = `<node>
+  <interface name="io.github.danielmapar.AiTracker">
+    <method name="Open"/>
+  </interface>
+</node>`;
 
 // Switching accounts signs out first: `login` alone re-approves whatever account the browser is
 // signed in to. The scripts are fixed text; the tool's path is their only argument ("$0").
@@ -1034,6 +1049,9 @@ const AgentUsageIndicator = GObject.registerClass({
         super._init(0.5, 'Agent Usage', false);
 
         this._extPath = extension?.path ?? null;
+        this._uuid = extension?.uuid ?? null;
+        this._overviewId = 0; // waiting for the overview to close before opening (app launch)
+        this._appLink = null; // the exported D-Bus object the app opens the menu through
         this._icons = {panel: loadIcon(this._extPath, PANEL_ICON)};
         for (const t of TABS)
             this._icons[t.key] = loadIcon(this._extPath, t);
@@ -1076,6 +1094,51 @@ const AgentUsageIndicator = GObject.registerClass({
         this.connect('destroy', () => this._onDestroyed());
         this._render('init');
         this._loadSnapshot();
+        this._exportAppLink();
+    }
+
+    _exportAppLink() {
+        try {
+            const link = Gio.DBusExportedObject.wrapJSObject(APP_DBUS_XML, {Open: () => this._openFromApp()});
+            link.export(Gio.DBus.session, APP_DBUS_PATH);
+            this._appLink = link;
+        } catch (e) {
+            // Another copy holds the path (it is removed when this one is added to the panel).
+            logError(e, 'agent-usage: could not export the app link');
+        }
+    }
+
+    // The AI Tracker app asks for the menu: the same as a click on the icon. Launched from
+    // Activities, the overview is still closing, and the menu opens once it is gone.
+    _openFromApp() {
+        if (this._destroyed || this.menu.isOpen)
+            return;
+        if (Main.overview.visible) {
+            if (!this._overviewId) {
+                this._overviewId = Main.overview.connect('hidden', () => {
+                    Main.overview.disconnect(this._overviewId);
+                    this._overviewId = 0;
+                    if (!this._destroyed && !this.menu.isOpen)
+                        this.menu.open(BoxPointer.PopupAnimation.FULL);
+                });
+            }
+            return;
+        }
+        this.menu.open(BoxPointer.PopupAnimation.FULL);
+    }
+
+    // Quit: turn the extension off (GNOME remembers it across logins) until the app opens it again.
+    _quit() {
+        if (this._destroyed || !this._uuid)
+            return;
+        const uuid = this._uuid;
+        this.menu.close(BoxPointer.PopupAnimation.NONE);
+        Main.notify('AI Tracker quit', 'Open it again from Activities: search for AI Tracker.');
+        // After this click has finished: turning the extension off destroys this button.
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            Main.extensionManager.disableExtension(uuid);
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // The last complete snapshot, saved by the collector: one local file read at startup, so the
@@ -1176,10 +1239,16 @@ const AgentUsageIndicator = GObject.registerClass({
         this._viewport.add_child(this._content);
         this._root.add_child(this._viewport);
 
-        // Footer: freshness + Refresh.
+        // Footer: freshness + Quit + Refresh.
         const footer = hbox('au-footer', {x_expand: true});
         this._footer = footer;
         this._status = label('', 'au-footer-status', {x_expand: true});
+        this._quitButton = new St.Button({
+            child: new St.Icon({icon_name: 'system-shutdown-symbolic', style_class: 'au-quit-icon'}),
+            style_class: 'au-quit', can_focus: true, accessible_name: 'Quit AI Tracker', y_align: ALIGN.CENTER,
+            visible: this._uuid !== null,
+        });
+        this._quitButton.connect('clicked', () => this._quit());
         this._refreshIcon = new St.Icon({icon_name: 'view-refresh-symbolic', style_class: 'au-refresh-icon'});
         this._refreshIcon.set_pivot_point(0.5, 0.5);
         const refreshInner = add(hbox('au-refresh-inner'), this._refreshIcon, label('Refresh', 'au-refresh-label'));
@@ -1187,7 +1256,7 @@ const AgentUsageIndicator = GObject.registerClass({
             child: refreshInner, style_class: 'au-refresh', can_focus: true, accessible_name: 'Refresh usage',
         });
         this._refreshButton.connect('clicked', () => this._refresh());
-        add(footer, this._status, this._refreshButton);
+        add(footer, this._status, this._quitButton, this._refreshButton);
         this._root.add_child(footer);
     }
 
@@ -2323,6 +2392,13 @@ const AgentUsageIndicator = GObject.registerClass({
     _onDestroyed() {
         this._destroyed = true;
         this._armed.clear();
+        try {
+            this._appLink?.unexport();
+        } catch {}
+        this._appLink = null;
+        if (this._overviewId)
+            Main.overview.disconnect(this._overviewId);
+        this._overviewId = 0;
         this._stopTick();
         this._clearWatchdog();
         if (this._recheckId)
@@ -2343,6 +2419,35 @@ const AgentUsageIndicator = GObject.registerClass({
     }
 });
 
+// One widget in the top bar: before a new one is made, a copy left there by an earlier build or by
+// the old "Agent Usage" extension is removed. A copy owned by another extension that is still
+// running is left to that extension.
+function removeLeftovers(uuid) {
+    const roles = new Map(Object.entries(Main.panel.statusArea).map(([role, actor]) => [actor, role]));
+    // The widgets GNOME knows by role, plus anything sitting in the top bar itself (the panel's boxes
+    // are private but long-standing; without them this still covers every widget added normally).
+    const found = new Set(roles.keys());
+    for (const box of [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox]) {
+        for (const container of box?.get_children?.() ?? [])
+            found.add(container.child ?? container);
+    }
+    for (const actor of found) {
+        if (!(actor instanceof PanelMenu.Button))
+            continue;
+        if (actor.constructor.name !== 'AgentUsageIndicator' && actor.accessible_name !== 'Agent Usage')
+            continue;
+        const role = roles.get(actor);
+        if (role && role !== uuid && Main.extensionManager.lookup(role)?.state === ExtensionState.ACTIVE)
+            continue;
+        actor.destroy(); // takes its panel container and statusArea entry with it
+    }
+}
+
 export function createIndicator(extension) {
+    try {
+        removeLeftovers(extension?.uuid ?? null);
+    } catch (e) {
+        logError(e, 'agent-usage: could not check for a leftover copy');
+    }
     return new AgentUsageIndicator(extension);
 }

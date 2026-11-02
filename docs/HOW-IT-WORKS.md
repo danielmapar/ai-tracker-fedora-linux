@@ -77,7 +77,7 @@ the collector prints one JSON object once everything is in.
 
 The collector runs only at these moments:
 
-- when you open the menu;
+- when you open the menu (a click, or opening the **AI Tracker** app);
 - when you click **Refresh**;
 - once, 2.5 s after a fix button's command finishes.
 
@@ -86,6 +86,25 @@ The only timers are UI timers:
 - a countdown-text tick while the menu is open;
 - a watchdog that ends a collector run that hangs;
 - short timers for button feedback.
+
+## Quit and open
+
+The widget is a GNOME Shell extension, and GNOME runs at most one copy of an extension.
+
+- **Quit** (the power button next to Refresh) turns the extension off, as the Extensions app would.
+  GNOME remembers that, so it stays off after the next login. A notification says how to open it
+  again.
+- **Open** is the **AI Tracker** app in Activities (`~/.local/bin/ai-tracker`). It turns the
+  extension back on if it was quit, then opens the menu. If the widget is already running, it only
+  opens the menu, so it never starts a second copy. Opening counts as a click: it fetches once.
+  Launched from Activities, the menu opens as soon as the overview has closed.
+- Right-click **AI Tracker** in Activities for **Quit**, or run `ai-tracker --quit`.
+- The app talks to GNOME Shell's own extensions interface over D-Bus. To open the menu it calls
+  `io.github.danielmapar.AiTracker.Open` at `/io/github/danielmapar/AiTracker`, on GNOME Shell's
+  connection. That method only opens the menu, and does nothing if it is already open.
+- A new widget removes any copy an earlier build left in the top bar, such as the old
+  "Agent Usage" extension's, unless another running extension owns it.
+- `./install.sh` turns a quit widget back on.
 
 ## Data sources
 
@@ -135,6 +154,7 @@ made-up data. Nothing signs in or out, opens a browser, changes a service or cal
 | collector unit tests | `cargo test` | plan names, limit windows, the relay-holder note |
 | collector end-to-end | `verify/e2e/collector_e2e.py`: the real binary in a throwaway HOME with fake `systemctl` / `journalctl`, a fake Codex service on the real socket path, and stand-in processes | every field it reports, streaming order, incremental journal reads, saved-value fallbacks, the private Codex fallback, and that it is read-only, never leaks the login token and keeps its cache private |
 | Codex watchdog | `verify/watchdog-test.sh`: fake Codex, fake Codex databases, a stand-in service | misses and the restart, recovery, and a relay held by another Codex app |
+| app | `verify/app-test.sh`: `app/ai-tracker` against a fake `gdbus` (GNOME Shell's extensions interface) and a fake `notify-send` | open when running, quit, open after quit, never a second copy, every failure message, the desktop entry |
 | widget end-to-end | `verify/e2e.sh`: `verify/e2e/widget-e2e.js` in a real headless GNOME Shell 50 | below |
 | widget visual walk-through | `verify/run.sh` | a screenshot of every state, in `verify/out/` |
 
@@ -150,7 +170,11 @@ covers:
   and the summary and panel dot.
 - **The real collector's output:** the end-to-end run's stream.
 - **Speed:** redraw and tab-switch times.
-- **Lifecycle:** reloading in place, destroying mid-run, no saved snapshot.
+- **Quit and the app:** Quit turns the extension off after the click and says how to come back;
+  opening over D-Bus (and with the real `ai-tracker` script) opens the menu with one fetch, waits
+  for the overview, and never makes a second copy.
+- **Lifecycle:** reloading in place, destroying mid-run (the app link goes too), no saved snapshot,
+  and leftover copies removed while other extensions' buttons stay.
 
 `AU_E2E_ONLY='Account|Limits' sh verify/e2e.sh` runs a subset. It writes one screenshot per test and
 `e2e-results.json` to `verify/out-e2e/`.

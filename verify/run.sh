@@ -17,13 +17,29 @@ OUT=${AU_OUT_DIR:-$V/out}
 BOX=$(mktemp -d "${TMPDIR:-/tmp}/au-ui-verify.XXXXXX")
 RUN=/run/user/$(id -u)/au-$$          # short: Wayland socket paths must be < 108 bytes
 EXT=$BOX/home/.local/share/gnome-shell/extensions/agent-usage-test@local
-trap '[ -n "${PID:-}" ] && kill -TERM -"$PID" 2>/dev/null; rm -rf "$BOX" "$RUN"' EXIT
+# Session helpers that D-Bus started (some in their own process group) can still write into the
+# sandbox while they exit, so stop anything using its runtime folder and remove it until it stays gone.
+cleanup() {
+    set +e # the shell is usually gone already: a failing kill must not end the cleanup (set -e)
+    [ -n "${PID:-}" ] && kill -TERM -"$PID" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8; do
+        for p in /proc/[0-9]*; do
+            grep -qz "^XDG_RUNTIME_DIR=$RUN\$" "$p/environ" 2>/dev/null && kill -TERM "${p#/proc/}" 2>/dev/null
+        done
+        fusermount3 -u -z "$RUN/doc" 2>/dev/null || fusermount -u -z "$RUN/doc" 2>/dev/null
+        rm -rf "$BOX" "$RUN" 2>/dev/null
+        sleep 1
+        [ -e "$BOX" ] || [ -e "$RUN" ] || break
+    done
+}
+trap cleanup EXIT
 mkdir -p "$OUT" "$EXT" "$BOX/home/.local/bin" "$BOX/home/scenarios" "$BOX/home/.config/glib-2.0/settings" "$RUN"
 chmod 700 "$RUN"; rm -f "$OUT"/*.png "$OUT/DONE"
 cp "$UI/ui.js" "$UI/stylesheet.css" "$EXT/"
 cp "${AU_HARNESS:-$V/harness-extension.js}" "$EXT/extension.js"
 printf '{"uuid":"agent-usage-test@local","name":"AU harness","description":"test","shell-version":["50"]}' > "$EXT/metadata.json"
 install -m 755 "$V/fake-collector.sh" "$BOX/home/.local/bin/agent-usage"
+install -m 755 "$(dirname "$V")/app/ai-tracker" "$BOX/home/.local/bin/ai-tracker"   # the real app script
 mkdir -p "$BOX/home/fakebin" && install -m 755 "$V"/fakebin/* "$BOX/home/fakebin/"
 python3 -I "$V/scenarios.py" "$V/sample.json" "$BOX/home/scenarios" >/dev/null
 [ -n "${AU_EXTRA_SCENARIOS:-}" ] && [ -d "$AU_EXTRA_SCENARIOS" ] && { cp "$AU_EXTRA_SCENARIOS"/* "$BOX/home/scenarios/" 2>/dev/null || true; }

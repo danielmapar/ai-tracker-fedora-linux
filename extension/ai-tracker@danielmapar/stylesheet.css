@@ -328,6 +328,15 @@
 .au-refresh-inner { spacing: 7px; }
 .au-refresh-icon { icon-size: 1em; }
 .au-refresh-label { font-size: 0.85em; font-weight: 700; }
+.au-quit {
+  padding: 6px 8px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.62);
+  transition-duration: 120ms;
+}
+.au-quit:hover { color: #ffffff; background-color: rgba(255, 255, 255, 0.12); }
+.au-quit:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35); }
+.au-quit-icon { icon-size: 1em; }
 
 /* ---------- first-open skeleton ---------- */
 

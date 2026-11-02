@@ -29,6 +29,9 @@ It fetches only when you open it, never in the background.
   running sessions asks twice.
 - **Fast**: opens instantly with the last numbers, then streams in fresh ones. The first frame takes under
   10 ms, and the live parts arrive within about half a second.
+- **Quit and open like an app**: the power button in the menu takes it off the top bar, and it stays
+  off after you log in again. Open **AI Tracker** from Activities to bring it back. There is only
+  ever one copy.
 
 ## Install
 
@@ -45,6 +48,10 @@ cd ai-tracker-fedora-linux
 ```
 
 Log out and back in once. After that, `./install.sh` updates the widget in place.
+
+To quit it, click the power button next to **Refresh**, or right-click **AI Tracker** in Activities
+and choose **Quit**. To open it again, open **AI Tracker** from Activities. From a terminal:
+`ai-tracker` opens it, and `ai-tracker --quit` quits it.
 
 ### Live Claude limits (optional)
 
@@ -82,7 +89,7 @@ A small Rust program (`collector/`) gathers everything and prints JSON. The GNOM
 
 ```sh
 agent-usage --pretty    # one snapshot (contains your account emails: don't share it)
-sh verify/test-all.sh   # every test: collector, watchdog and widget end-to-end, all sandboxed
+sh verify/test-all.sh   # every test: collector, watchdog, app and widget end-to-end, all sandboxed
 sh verify/e2e.sh        # just the widget end-to-end suite (headless GNOME Shell, made-up data)
 sh verify/demo.sh       # re-record docs/demo.gif (needs ffmpeg and Pillow)
 ```

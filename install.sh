@@ -2,6 +2,8 @@
 # Build and install AI Tracker for the current user:
 #   collector  -> ~/.local/bin/agent-usage                                   (Rust, via cargo)
 #   extension  -> ~/.local/share/gnome-shell/extensions/ai-tracker@danielmapar
+#   app        -> "AI Tracker" in Activities (opens the widget; Quit in its right-click menu)
+#                 and the `ai-tracker [--quit]` command in ~/.local/bin
 # Usage: ./install.sh [--workers]
 #   --workers  also install the remote-access workers the widget monitors (systemd user units, see
 #              remote-workers/). They are installed but not switched on: turning them on lets your
@@ -20,7 +22,7 @@ WORKERS=0
 for a in "$@"; do
     case "$a" in
         --workers) WORKERS=1 ;;
-        -h | --help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $a (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -50,16 +52,37 @@ mv "$DEST/ui-current.tmp" "$DEST/ui-current"
 find "$DEST" -maxdepth 1 -name 'ui-*.js' ! -name "$build" -delete
 echo "    $DEST ($build)"
 
-# Enabled at the next login even if this shell has never seen the extension.
+# Enabled at the next login even if this shell has never seen the extension. Installing turns a
+# quit widget back on: Quit puts it on GNOME's disabled list, which wins over the enabled one.
 python3 -I - "$UUID" <<'EOF' || echo "    could not update GNOME settings here; enable it later with: gnome-extensions enable $UUID"
 import ast, subprocess, sys
 uuid = sys.argv[1]
-raw = subprocess.check_output(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], text=True)
-cur = ast.literal_eval(raw.replace("@as ", "").strip())
-if uuid not in cur:
-    subprocess.check_call(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(cur + [uuid])])
+def get(key):
+    raw = subprocess.check_output(["gsettings", "get", "org.gnome.shell", key], text=True)
+    return ast.literal_eval(raw.replace("@as ", "").strip())
+def put(key, value):
+    subprocess.check_call(["gsettings", "set", "org.gnome.shell", key, str(value)])
+off = get("disabled-extensions")
+if uuid in off:
+    put("disabled-extensions", [u for u in off if u != uuid])
+    print(f"    turned {uuid} back on (it had been quit)")
+on = get("enabled-extensions")
+if uuid not in on:
+    put("enabled-extensions", on + [uuid])
     print(f"    enabled {uuid}")
 EOF
+
+echo "==> app"
+APP_ID=io.github.danielmapar.AiTracker
+SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
+mkdir -p "$SHARE/applications" "$SHARE/icons/hicolor/scalable/apps"
+install -m 755 "$REPO/app/ai-tracker" "$BIN/ai-tracker"
+install -m 644 "$REPO/app/$APP_ID.svg" "$SHARE/icons/hicolor/scalable/apps/$APP_ID.svg"
+sed "s|@BIN@|$BIN|g" "$REPO/app/$APP_ID.desktop.in" > "$SHARE/applications/.$APP_ID.desktop.tmp"
+chmod 644 "$SHARE/applications/.$APP_ID.desktop.tmp"
+mv "$SHARE/applications/.$APP_ID.desktop.tmp" "$SHARE/applications/$APP_ID.desktop"
+if command -v update-desktop-database >/dev/null; then update-desktop-database -q "$SHARE/applications" || true; fi
+echo "    \"AI Tracker\" in Activities, and the command: ai-tracker [--quit]"
 
 if [ "$WORKERS" = 1 ]; then
     echo "==> remote-access workers"
