@@ -9,12 +9,16 @@
 ## What each tab shows
 
 - **Health line.** For example "Remote access healthy" or "5-hour at 92% · 3 remote issues".
-- **Account and plan.** A button opens a terminal with `claude auth login` or `codex login`.
+- **Account and plan.** A button opens a terminal with `claude auth login` or `codex login`. A Max 20x
+  login shows as Ultra, the plan's name since 30 October 2026; the login files still say `max`.
 - **Plan limits.** A ring per limit window shows:
   - the percentage used;
   - a reset countdown;
   - a pace marker, a dot showing how much of the window has passed;
   - a projection such as "full in ~19m" when you are using it up faster than the window resets.
+
+  Claude shows every window the account has, including model-scoped weekly limits such as Ultra's
+  separate Fable limit.
 - **Tokens.**
   - Claude: today's tokens on this computer, counted from local transcripts.
   - Codex: today, the last 7 days and lifetime, for the whole account.
@@ -79,13 +83,13 @@ The only timers are UI timers:
 
 | What | Where it comes from |
 | --- | --- |
-| Claude account, plan | `~/.claude.json`, `~/.claude/.credentials.json` (plan, scopes, expiry) |
+| Claude account, plan | `~/.claude.json`, `~/.claude/.credentials.json` (plan, rate-limit tier, scopes, expiry) |
 | Claude limits (opt-in) | `GET https://api.anthropic.com/api/oauth/usage` with the Claude Code login: undocumented and rate-limited to a few calls a minute, so the last good values are shown when it refuses |
 | Claude tokens today | transcripts under `~/.claude/projects`, scanned incrementally |
 | Claude remote server | `claude-remote-control.service` and its journal |
 | Claude terminal sessions | `~/.claude/sessions/*.json` |
 | Codex account, limits, tokens, relay | the Codex background service's control socket, `~/.codex/app-server-control/app-server-control.sock` (JSON-RPC `account/read`, `account/rateLimits/read`, `account/usage/read`, `remoteControl/status/read`) |
-| Codex watchdog | `codex-remote-control.service` / `.timer` and its journal |
+| Codex watchdog | `codex-remote-control.service` / `.timer`, its journal, and its note of which other Codex app holds the phone link (`$XDG_RUNTIME_DIR/codex-remote-control-watchdog.held`) |
 | SSH (for the Codex desktop app) | `sshd.service` |
 
 ## Privacy and safety
@@ -128,6 +132,10 @@ It writes screenshots and pass/fail checks to `verify/out/` and never touches yo
 services or settings.
 
 `verify/demo.sh` records `docs/demo.gif` the same way, driving the widget with a virtual mouse.
+
+`verify/watchdog-test.sh` runs the Codex watchdog against a fake Codex, fake Codex databases and a
+stand-in service in a temporary HOME. It covers the relay checks: misses and the restart, recovery,
+and a relay held by another Codex app.
 
 Collector flags and variables:
 

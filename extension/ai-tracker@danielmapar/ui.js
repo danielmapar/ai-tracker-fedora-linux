@@ -155,7 +155,7 @@ function claudeLink(v) {
 const titleCase = s => `${s ?? ''}`.replace(/_/g, ' ').replace(/(^|\s|-)\w/g, m => m.toUpperCase());
 
 const PLAN_NAMES = {
-    max: 'Max', pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', enterprise: 'Enterprise',
+    ultra: 'Ultra', max: 'Max', pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', enterprise: 'Enterprise',
     free: 'Free', business: 'Business', edu: 'Edu', go: 'Go',
 };
 
@@ -510,6 +510,10 @@ function codexWorkers(w, pending = new Set()) {
         });
     } else if (relay.status === 'connected') {
         rows.push({...service, level: 'ok', detail: ['Phone link connected', relay.name].filter(Boolean).join(' · ')});
+    } else if (wd.relay_held_by) {
+        // Another Codex app here (Codex Desktop) holds the relay under the same server identity: the
+        // phone reaches this computer through it, and the watchdog leaves the service alone.
+        rows.push({...service, level: 'ok', detail: `Phone link via ${clip(wd.relay_held_by, 40)}`});
     } else {
         const status = relay.status ? `${relay.status}` : 'unknown';
         rows.push({

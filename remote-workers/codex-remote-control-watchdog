@@ -7,6 +7,10 @@
 #     `codex app-server proxy`) started its own unmanaged server, which blocks the managed one,
 #     replace it.
 #   - If the service runs but stays disconnected from the relay for 3 checks, restart it.
+#   - Unless the relay refuses it because another Codex app on this computer already holds the
+#     link (e.g. Codex Desktop enables remote control under the same server identity, and the relay
+#     takes one connection per server): your phone reaches this computer through that app, and a
+#     restart cannot help, so it only notes the holder in $HELD for the widget.
 # Anything that launches the service runs in its own systemd scope: this watchdog is a short-lived
 # unit, and systemd would otherwise kill the service together with it when the check finishes.
 set -u
@@ -14,16 +18,20 @@ CODEX="$HOME/.local/bin/codex"
 MANAGED="$HOME/.codex/packages/app-server-daemon/"
 # Private per-user runtime dir only (never a shared /tmp): the file holds a counter.
 STATE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set; run this from the systemd user timer}/codex-remote-control-watchdog.misses"
+# Which other Codex app holds the relay link; rewritten every check while that lasts.
+HELD="$XDG_RUNTIME_DIR/codex-remote-control-watchdog.held"
 ME=$(id -u)
 
 detached() { systemd-run --user --scope --quiet --collect -- "$@"; }
 
-managed_running() {
+# Prints the managed service's pid; fails when it is not running.
+managed_pid() {
     for p in $(pgrep -u "$ME" -f 'app-server --remote-control'); do
-        case "$(readlink -f "/proc/$p/exe" 2>/dev/null)" in "$MANAGED"*) return 0 ;; esac
+        case "$(readlink -f "/proc/$p/exe" 2>/dev/null)" in "$MANAGED"*) echo "$p"; return 0 ;; esac
     done
     return 1
 }
+managed_running() { managed_pid >/dev/null; }
 
 # Unmanaged app-servers: only your own processes, and only real Codex binaries (an executable
 # named `codex`), so a grep, strace, editor or shell that mentions the same words is never touched.
@@ -35,6 +43,39 @@ stray_servers() {
             */codex) echo "$p" ;;
         esac
     done
+}
+
+# When the relay refused the service (pid $1) in the last 3 minutes with "409 Remote app server
+# already online", prints which Codex app holds the link instead. Reads Codex's own log and state
+# databases, read-only; prints nothing on any other outcome or error.
+held_by() {
+    python3 -I - "$1" <<'PYEOF' 2>/dev/null
+import glob, os, sqlite3, sys, time
+pid, home = sys.argv[1], os.path.expanduser("~/.codex")
+def db(pattern):
+    newest = max(glob.glob(os.path.join(home, pattern)), key=os.path.getmtime)
+    return sqlite3.connect(f"file:{newest}?mode=ro", uri=True, timeout=2)
+try:
+    hit = pid.isdigit() and db("logs_*.sqlite").execute(
+        "select 1 from logs where ts >= ? and process_uuid like ? and feedback_log_body like '%409 Conflict%'"
+        " and feedback_log_body like '%already online%' limit 1", (int(time.time()) - 180, f"pid:{pid}:%")).fetchone()
+except Exception:
+    hit = None
+if not hit:
+    sys.exit(0)
+name = "another Codex app"
+try:
+    rows = db("state_*.sqlite").execute(
+        "select app_server_client_name from remote_control_enrollments where remote_control_enabled = 1"
+        " and app_server_client_name != '' and server_id in"
+        " (select server_id from remote_control_enrollments where app_server_client_name = '')").fetchall()
+    names = sorted({"".join(c for c in r[0] if c.isprintable())[:40] for r in rows if r[0]})
+    if names:
+        name = " or ".join(names)
+except Exception:
+    pass
+print(name)
+PYEOF
 }
 
 status_of() {
@@ -56,16 +97,27 @@ if ! managed_running; then
     fi
     sleep 2
     managed_running && echo "background service is back" || echo "background service still not running"
-    rm -f "$STATE"
+    rm -f "$STATE" "$HELD"
     exit 0
 fi
 
 # Running: check the relay connection (does not launch anything when the service is up).
 status=$(status_of "$(timeout 20 "$CODEX" remote-control start --json 2>/dev/null | tail -n 1)")
 if [ "$status" = "connected" ]; then
-    [ -f "$STATE" ] && { echo "connected again"; rm -f "$STATE"; }
+    if [ -f "$STATE" ] || [ -f "$HELD" ]; then
+        echo "connected again"
+        rm -f "$STATE" "$HELD"
+    fi
     exit 0
 fi
+holder=$(held_by "$(managed_pid)")
+if [ -n "$holder" ]; then
+    [ -f "$HELD" ] || echo "phone link held by $holder on this computer; not restarting"
+    printf '%s\n' "$holder" > "$HELD"
+    rm -f "$STATE"
+    exit 0
+fi
+rm -f "$HELD"
 # The counter is read as plain digits only (never evaluated as shell arithmetic).
 misses=$(cat "$STATE" 2>/dev/null || true)
 case $misses in '' | *[!0-9]*) misses=0 ;; esac

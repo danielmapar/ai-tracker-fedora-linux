@@ -318,24 +318,43 @@ fn claude_account_direct(h: &Path, creds: Option<&Value>, settings: Option<&Valu
         thread::sleep(Duration::from_millis(5 << i));
     }
     let acct = acct?;
+    let tier = oauth["rateLimitTier"].as_str().or(acct["organizationRateLimitTier"].as_str());
     Some(json!({
         "logged_in": true,
         "email": acct["emailAddress"],
-        "plan": plan,
+        "plan": claude_plan(plan, tier),
         "org": acct["organizationName"],
         "auth_method": "claude.ai",
     }))
 }
 
+/// The plan as claude.ai names it. Anthropic renamed Max 20x to Ultra on 2026-10-30, but the login
+/// still says `max` and tells the two Max sizes apart only by the rate-limit tier (Claude Code does
+/// the same check).
+fn claude_plan(sub: &str, tier: Option<&str>) -> String {
+    match (sub, tier) {
+        ("max", Some("default_claude_max_20x")) => "ultra".into(),
+        _ => sub.into(),
+    }
+}
+
 /// The original: ask the CLI (slow: ~0.1-0.5 s, ~140 MB).
-fn claude_account_cli() -> Value {
+fn claude_account_cli(creds: Option<&Value>) -> Value {
     let bin = tool("claude");
     match run(&[&bin, "auth", "status", "--json"]) {
         Some((_, out)) => match serde_json::from_str::<Value>(&out) {
             Ok(d) => json!({
                 "logged_in": d["loggedIn"].as_bool().unwrap_or(false),
                 "email": d["email"],
-                "plan": d["subscriptionType"],
+                "plan": match d["subscriptionType"].as_str() {
+                    // `auth status` has no tier: take it from the login file when that is the same plan.
+                    Some(sub) => {
+                        let o = creds.map(|c| &c["claudeAiOauth"]);
+                        let tier = o.filter(|o| o["subscriptionType"] == sub).and_then(|o| o["rateLimitTier"].as_str());
+                        json!(claude_plan(sub, tier))
+                    }
+                    None => d["subscriptionType"].clone(),
+                },
                 "org": d["orgName"],
                 "auth_method": d["authMethod"],
             }),
@@ -530,6 +549,31 @@ const EVENTS_FILE: &str = "codex-events-v1.json";
 /// Watchdog events kept for the day's timeline (the counts cover the whole day).
 const EVENTS_KEPT: usize = 40;
 
+/// Which other Codex app on this computer holds the relay link, as the watchdog last found it. The
+/// relay takes one connection per server identity, and Codex Desktop enables remote control under
+/// the background service's identity, so while it is open your phone reaches this computer through
+/// it and the service is refused ("409 Remote app server already online"). The watchdog rewrites the
+/// file every check while that lasts, so a file older than 3 minutes means nothing.
+fn relay_held_by(runtime_dir: &Path, now_secs: i64) -> Option<String> {
+    let p = runtime_dir.join("codex-remote-control-watchdog.held");
+    let md = fs::symlink_metadata(&p).ok().filter(|m| m.is_file() && m.len() <= 256)?;
+    let at = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    if now_secs - at > 180 {
+        return None;
+    }
+    let text = fs::read_to_string(&p).ok()?;
+    let name: String = text.lines().next()?.chars().filter(|c| !c.is_control()).take(60).collect();
+    Some(name.trim().to_string()).filter(|n| !n.is_empty())
+}
+
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        // SAFETY: getuid has no preconditions and cannot fail.
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
+}
+
 /// Today's actions of the Codex watchdog. It logs only when something was wrong (relay
 /// disconnected, service down, stray server) or was fixed, so every line of its own is an event.
 /// Its unit also gets three systemd lines a minute, so this read is incremental too.
@@ -604,6 +648,19 @@ fn claude_usage_live(creds: Option<&Value>) -> Value {
         Err(ureq::Error::Status(code, _)) => return json!({ "error": format!("Usage endpoint returned HTTP {code}") }),
         Err(_) => return json!({ "error": "Could not reach claude.ai (offline?)" }),
     };
+    let windows = claude_windows(&d);
+    let extra = &d["extra_usage"];
+    json!({
+        "windows": windows,
+        "extra_usage": if extra["is_enabled"].as_bool() == Some(true) {
+            json!({ "pct": extra["utilization"], "used": extra["used_credits"], "limit": extra["monthly_limit"], "currency": extra["currency"] })
+        } else { Value::Null },
+    })
+}
+
+/// Limit windows from the usage response: the fixed keys, plus the model- or surface-scoped weekly
+/// limits that only the `limits` list carries (Ultra's separate weekly Fable limit).
+fn claude_windows(d: &Value) -> Vec<Value> {
     let named = [
         ("five_hour", "5-hour"),
         ("seven_day", "Weekly"),
@@ -623,13 +680,27 @@ fn claude_usage_live(creds: Option<&Value>) -> Value {
             }));
         }
     }
-    let extra = &d["extra_usage"];
-    json!({
-        "windows": windows,
-        "extra_usage": if extra["is_enabled"].as_bool() == Some(true) {
-            json!({ "pct": extra["utilization"], "used": extra["used_credits"], "limit": extra["monthly_limit"], "currency": extra["currency"] })
-        } else { Value::Null },
-    })
+    for l in d["limits"].as_array().into_iter().flatten() {
+        if l["kind"] != "weekly_scoped" {
+            continue;
+        }
+        let (scope, pct) = (&l["scope"], l["percent"].as_f64());
+        let name = [&scope["model"]["display_name"], &scope["surface"]["display_name"], &scope["surface"]]
+            .into_iter()
+            .find_map(|v| v.as_str())
+            .map(|n| n.chars().filter(|c| !c.is_control()).take(24).collect::<String>());
+        let (Some(name), Some(pct)) = (name.filter(|n| !n.trim().is_empty()), pct) else { continue };
+        let label = format!("Weekly · {}", name.trim());
+        if windows.iter().any(|w| w["label"] == label.as_str()) {
+            continue;
+        }
+        windows.push(json!({
+            "label": label,
+            "pct": pct,
+            "resets_at": l["resets_at"].as_str().and_then(parse_iso),
+        }));
+    }
+    windows
 }
 
 fn claude_server(active: bool, lines: &[String]) -> Value {
@@ -1120,7 +1191,7 @@ fn claude_live_enabled() -> bool {
         .is_some_and(|c| c["claude_live_limits"].as_bool() == Some(true))
 }
 
-/// Claude Code's credentials, reduced to what the collector uses: plan, scopes, expiry and whether a
+/// Claude Code's credentials, reduced to what the collector uses: plan, tier, scopes, expiry and whether a
 /// login exists. The access token itself is kept only when live limits are on; the refresh token and
 /// everything else in the file are dropped right after parsing.
 fn read_creds(p: &Path, with_token: bool) -> Option<Value> {
@@ -1133,6 +1204,7 @@ fn read_creds(p: &Path, with_token: bool) -> Option<Value> {
         "expiresAt": o["expiresAt"],
         "scopes": o["scopes"],
         "subscriptionType": o["subscriptionType"],
+        "rateLimitTier": o["rateLimitTier"],
     }}))
 }
 
@@ -1219,7 +1291,7 @@ fn main() {
 
         let account = claude_account_direct(&h, creds.as_ref(), settings.as_ref()).unwrap_or_else(|| {
             trace("claude account: falling back to `claude auth status`");
-            claude_account_cli()
+            claude_account_cli(creds.as_ref())
         });
         trace("claude account: done");
         let sessions = claude_sessions(&h);
@@ -1265,6 +1337,7 @@ fn main() {
                         "last_run": stamp(CODEX_UNIT, "ExecMainExitTimestamp"),
                         "last_ok": prop(CODEX_UNIT, "Result").map(|v| v == "success"),
                         "last_message": last,
+                        "relay_held_by": relay_held_by(&runtime_dir(), now()),
                     },
                     "ssh": { "active": ssh },
                 },
@@ -1335,5 +1408,64 @@ fn main() {
         if let Ok(v) = TRACE.lock() {
             eprintln!("{}", v.join("\n"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_20x_is_ultra() {
+        assert_eq!(claude_plan("max", Some("default_claude_max_20x")), "ultra");
+        assert_eq!(claude_plan("max", Some("default_claude_max_5x")), "max");
+        assert_eq!(claude_plan("max", None), "max");
+        assert_eq!(claude_plan("pro", Some("default_claude_max_20x")), "pro");
+        assert_eq!(claude_plan("ultra", None), "ultra");
+    }
+
+    #[test]
+    fn relay_holder_file() {
+        let dir = std::env::temp_dir().join(format!("agent-usage-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("codex-remote-control-watchdog.held");
+        assert_eq!(relay_held_by(&dir, now()), None);
+        fs::write(&f, "Codex Desktop\n").unwrap();
+        assert_eq!(relay_held_by(&dir, now()).as_deref(), Some("Codex Desktop"));
+        assert_eq!(relay_held_by(&dir, now() + 181), None); // stale: the watchdog stopped checking
+        fs::write(&f, "  \n").unwrap();
+        assert_eq!(relay_held_by(&dir, now()), None);
+        fs::write(&f, "a\u{1b}[31mb\n").unwrap();
+        assert_eq!(relay_held_by(&dir, now()).as_deref(), Some("a[31mb"));
+        fs::write(&f, "x".repeat(300)).unwrap();
+        assert_eq!(relay_held_by(&dir, now()), None); // oversized
+        fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", &f).unwrap();
+        assert_eq!(relay_held_by(&dir, now()), None); // never follows a link
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scoped_weekly_limits() {
+        let d = json!({
+            "five_hour": null,
+            "seven_day": { "utilization": 32.0, "resets_at": "2026-11-05T21:59:59.738180+00:00" },
+            "seven_day_opus": { "utilization": 5.0, "resets_at": null },
+            "limits": [
+                { "kind": "weekly_all", "percent": 32, "scope": null },
+                { "kind": "weekly_scoped", "percent": 0, "resets_at": "2026-11-05T22:00:00+00:00",
+                  "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null } },
+                { "kind": "weekly_scoped", "percent": 7, "scope": { "model": { "display_name": "Opus" } } },
+                { "kind": "weekly_scoped", "percent": 1, "scope": { "model": { "display_name": "  " } } },
+                { "kind": "weekly_scoped", "scope": { "model": { "display_name": "NoPercent" } } }
+            ]
+        });
+        let w = claude_windows(&d);
+        let labels: Vec<_> = w.iter().map(|w| w["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Weekly", "Weekly · Opus", "Weekly · Fable"]);
+        assert_eq!(w[2]["pct"], 0.0);
+        assert!(w[2]["resets_at"].as_i64().is_some());
+        assert_eq!(w[1]["pct"], 5.0); // the fixed key wins over the list
+        assert!(claude_windows(&json!({})).is_empty());
     }
 }

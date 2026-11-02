@@ -136,8 +136,12 @@ codex app-server daemon disable-remote-control     # turn remote access off
 
 The Codex desktop app has its own built-in app-server. Two problems follow from that:
 
-- **409 "Remote app server already online".** It shares the `~/.codex` identity with the daemon, so
-  turning on the desktop app's own remote control while the daemon is online fails with this error.
+- **409 "Remote app server already online".** It shares the `~/.codex` identity with the daemon (its
+  own remote-control enrollment, "Codex Desktop", carries the daemon's server ID), and the relay takes
+  one connection per server. So whichever of the two connects first holds the link, and the other is
+  refused with this error until the holder lets go. Newer desktop apps turn their remote control on by
+  themselves, so after a network blip the app can win the race and keep the link for as long as it
+  is open. Phone access still works, through the desktop app, but the daemon reports `errored`.
 - **No live updates.** Left on its own, the desktop app shows threads started elsewhere only after
   it restarts.
 
@@ -188,6 +192,12 @@ Each run does one of three things:
   unix://…` without remote control. That process blocks the daemon from coming back. The watchdog
   stops it (only your own `codex` processes) and runs `bootstrap --remote-control`.
 - **The daemon runs but is disconnected from the relay for 3 checks in a row:** restart it.
+  - Except when the relay refused it with 409 because another Codex app on this computer holds the
+    link (see above). A restart can't help then. The watchdog finds the 409 in Codex's own log
+    database, read-only, and writes the holder's name to
+    `$XDG_RUNTIME_DIR/codex-remote-control-watchdog.held`. The widget shows it as "Phone link via
+    Codex Desktop". The daemon keeps retrying every 15–30 s by itself and takes the link back once
+    the desktop app lets go of it.
 
 ```sh
 systemctl --user enable --now codex-remote-control.timer
@@ -203,6 +213,10 @@ Lessons from building it:
 - **Give the oneshot a `TimeoutStartSec`,** so a hung check can't block the timer forever.
 - **`pgrep -f` matches more than you want,** including your own grep, scripts and editors that
   mention the pattern. Filter by user (`-u`) and check `/proc/<pid>/exe`.
+- **Find out why the relay refuses before restarting.** `remoteControl/status/read` only says
+  `errored`. The reason, such as the 409, is only in Codex's log database (`~/.codex/logs_*.sqlite`).
+  A watchdog that restarted on every `errored` once ran all night while the desktop app held the
+  link: dozens of restarts, and each one also cut the desktop app's SSH connection.
 - In a crash test (killing the daemon), the timer brought it back within about 22 s.
 
 ## After a reboot: checklist

@@ -123,6 +123,16 @@ export default class HarnessExtension extends Extension {
         check(!!ind._models.codex.tokens?.staleAt && !!ind._models.codex.usage?.staleAt &&
               ind._models.codex.usage.windows.length > 0, 'Codex limits and tokens keep their saved values when a fetch fails');
         tab('claude'); await sleep(300); close(); await sleep(300);
+        setScenario('ultra'); open(); await sleep(1200); await shotActor('15d-claude-ultra', menu());
+        check(ind._models.claude.account.plan === 'Ultra' &&
+              ind._models.claude.usage.windows.map(w => w.label).join() === 'Weekly,Weekly · Fable', 'Ultra plan with its weekly Fable limit');
+        close(); await sleep(300);
+        setScenario('codexdesktop'); open(); await sleep(900); tab('codex'); await sleep(900);
+        await shotActor('15e-codex-desktop-holds-link', menu());
+        const svcRow = ind._models.codex.remote.rows.find(r => r.name === 'Background service');
+        check(svcRow?.level === 'ok' && /via Codex Desktop/.test(svcRow?.detail) && !svcRow?.action &&
+              ind._models.codex.level === 'ok', 'phone link held by Codex Desktop: healthy, no restart offered');
+        tab('claude'); await sleep(300); close(); await sleep(300);
         setScenario('claudeoff'); open(); await sleep(1200); await shotActor('15b-claude-limits-off', menu());
         check(ind._models.claude.usage.off === true && ind._models.claude.level === 'ok', 'live Claude limits off: calm notice, no warning');
         close(); await sleep(300);

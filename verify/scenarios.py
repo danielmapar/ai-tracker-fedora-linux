@@ -175,3 +175,20 @@ cs["codex"]["usage"] = {"error": "Could not read limits: timeout",
 cs["codex"]["tokens"] = {"error": "Codex token totals did not load: timeout",
                          "stale": {**sc["two"]["codex"]["tokens"], "fetched_at": now - 25*60}}
 (out / "codexstale.json").write_text(json.dumps(cs))
+
+# Ultra (the renamed Max 20x): the login says "max" and the collector reports "ultra"; no 5-hour
+# window, and a separate weekly Fable limit
+ul = copy.deepcopy(sc["healthy"])
+ul["claude"]["account"]["plan"] = "ultra"
+ul["claude"]["usage"]["windows"] = [
+    {"label": "Weekly", "pct": 32.0, "resets_at": now + 3*D + 4*H},
+    {"label": "Weekly · Fable", "pct": 0.0, "resets_at": now + 3*D + 4*H}]
+(out / "ultra.json").write_text(json.dumps(ul))
+
+# Codex Desktop holds the relay under the background service's identity: the service is refused
+# (relay "errored") but the phone reaches this computer through the desktop app
+cd = copy.deepcopy(sc["two"])
+cd["codex"]["workers"]["service"]["relay"] = {"name": "my-laptop", "status": "errored"}
+cd["codex"]["workers"]["watchdog"]["relay_held_by"] = "Codex Desktop"
+cd["codex"]["workers"]["watchdog"]["last_message"] = "phone link held by Codex Desktop on this computer; not restarting"
+(out / "codexdesktop.json").write_text(json.dumps(cd))
