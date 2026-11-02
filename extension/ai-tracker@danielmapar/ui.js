@@ -302,6 +302,17 @@ function usageModel(u) {
 function tokensModel(key, t) {
     if (!t || typeof t !== 'object')
         return null;
+    // A failed fetch (slow or unreachable service) carries the last good totals under `stale`.
+    let staleAt = null;
+    if (t.error) {
+        const s = t.stale;
+        if (!s || typeof s !== 'object')
+            return null;
+        const at = num(s.fetched_at);
+        staleAt = (Number.isFinite(at) && GLib.DateTime.new_from_unix_local(at)?.format('%H:%M')) || 'earlier';
+        // A saved "today" from an earlier day is not today's count.
+        t = Number.isFinite(at) && at < localMidnight() ? {...s, today: null} : s;
+    }
     if (key === 'claude') {
         const total = num(t.today_total);
         if (!Number.isFinite(total))
@@ -327,7 +338,8 @@ function tokensModel(key, t) {
     const ratio = today > 0 && avg > 0 ? today / avg : NaN;
     return {
         title: 'Tokens',
-        aside: 'whole account',
+        aside: staleAt ? `saved ${staleAt}` : 'whole account',
+        staleAt,
         tiles: [
             {value: fmtTokens(today), caption: Number.isFinite(ratio) ? `today · ${ratio.toFixed(1)}× avg` : 'today'},
             {value: fmtTokens(week), caption: 'last 7 days'},
@@ -345,6 +357,8 @@ function claudeHistory(srv, loading = false) {
         : null;
     if (!srv.service_active && !drops?.length)
         return null;
+    if (drops === null && !loading && !Number.isFinite(since))
+        return null; // nothing to show (no history in this snapshot)
     const marks = (drops ?? []).map(d => ({at: d.at, level: d.secs >= 60 ? 'bad' : 'warn'}));
     const text = now => {
         const parts = [];
@@ -376,6 +390,8 @@ function codexHistory(svc, wd, loading = false) {
         .map(e => ({at: num(e.at), msg: `${e.msg ?? ''}`}))
         .filter(e => isRestart(e.msg) || e.msg.includes('(miss '))
         .map(e => ({at: e.at, level: isRestart(e.msg) ? 'bad' : 'warn'}));
+    if (!ev && !loading && !(svc.running && Number.isFinite(since)))
+        return null; // nothing to show (no history in this snapshot)
     const restarts = num(ev?.restarts) || 0;
     const misses = num(ev?.relay_misses) || 0;
     const lastFix = [...recent].reverse().find(e => isRestart(`${e.msg ?? ''}`));
@@ -1739,11 +1755,12 @@ const AgentUsageIndicator = GObject.registerClass({
         return add(row, avatar, text, button);
     }
 
-    _section(title, aside, loading = false) {
+    _section(title, aside, loading = false, stale = false) {
         const sec = vbox('au-section', {x_expand: true});
         const head = hbox('au-section-head', {x_expand: true});
+        const asideClass = stale ? 'au-section-aside au-section-stale' : 'au-section-aside';
         add(head, label(title, 'au-section-title', {x_expand: true}),
-            loading ? label('updating…', 'au-section-aside au-section-busy') : aside ? label(aside, 'au-section-aside') : null);
+            loading ? label('updating…', 'au-section-aside au-section-busy') : aside ? label(aside, asideClass) : null);
         sec.add_child(head);
         return sec;
     }
@@ -1927,7 +1944,7 @@ const AgentUsageIndicator = GObject.registerClass({
         // Claude's are counted locally (always in the first frame); Codex's come from its account.
         const parts = m.key === 'codex' ? ['codex.tokens'] : [];
         const loading = parts.some(p => this._pending.has(p));
-        const sec = this._section(t?.title ?? 'Tokens', t?.aside, loading);
+        const sec = this._section(t?.title ?? 'Tokens', t?.aside, loading, !!t?.staleAt);
         const tiles = homogeneous(hbox('au-tiles', {x_expand: true}));
         if (!t && loading) {
             for (let i = 0; i < 3; i++)

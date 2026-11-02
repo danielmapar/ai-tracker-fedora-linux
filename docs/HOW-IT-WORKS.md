@@ -105,7 +105,9 @@ The only timers are UI timers:
   0600:
   - `last-snapshot.json`: the last output, including your account emails and session titles;
   - `claude-tokens-v1.bin`: transcript token counts;
-  - `claude-usage-last.json`: the last good Claude limits;
+  - `claude-usage-last.json`, `codex-usage-last.json`, `codex-tokens-last.json`: the last good limits
+    and token totals, shown with their time when a live call fails (for example a slow OpenAI
+    response or a stopped service);
   - `claude-drops-v2.json` and `codex-events-v1.json`: journal cursors and today's events.
 - **Commands.** The widget runs only fixed commands: the collector, `systemctl --user …`,
   `systemd-run --user --scope … codex app-server daemon restart`, and a terminal for login. No value

@@ -167,3 +167,11 @@ ev["recent"] += [{"at": now + 6, "msg": "unmanaged app-server (4242) is blocking
                  {"at": now + 9, "msg": "background service is back"}]
 fixed["codex"]["workers"]["watchdog"]["last_message"] = "background service is back"
 (out / "demo-healthy.json").write_text(json.dumps(fixed))
+
+# Codex slow or unreachable: limits and token totals fall back to the last good values
+cs = copy.deepcopy(sc["two"])
+cs["codex"]["usage"] = {"error": "Could not read limits: timeout",
+                        "stale": {**sc["two"]["codex"]["usage"], "fetched_at": now - 25*60}}
+cs["codex"]["tokens"] = {"error": "Codex token totals did not load: timeout",
+                         "stale": {**sc["two"]["codex"]["tokens"], "fetched_at": now - 25*60}}
+(out / "codexstale.json").write_text(json.dumps(cs))

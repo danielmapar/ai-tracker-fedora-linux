@@ -10,6 +10,8 @@
 //! It writes only to ~/.cache/agent-usage/ (directory 0700, files 0600):
 //!   claude-tokens-v1.bin     incremental transcript token counts
 //!   claude-usage-last.json   the last good Claude limits (shown when the API refuses)
+//!   codex-usage-last.json    the last good Codex limits (shown when they fail to load)
+//!   codex-tokens-last.json   the last good Codex token totals (idem)
 //!   claude-drops-v2.json     journal cursor + today's Claude server reconnects
 //!   codex-events-v1.json     journal cursor + today's Codex watchdog messages
 //!   last-snapshot.json       the last complete output, incl. account emails and session titles
@@ -352,16 +354,22 @@ fn claude_usage(creds: Option<&Value>) -> Value {
         // Off by default: no token use, no request, and no saved numbers shown either.
         return json!({ "off": true });
     }
-    let mut v = claude_usage_live(creds);
+    let v = claude_usage_live(creds);
+    let ok = v.get("windows").is_some();
+    with_last_good("claude-usage-last.json", v, ok)
+}
+
+/// Last good value of a live part, for when a later fetch fails (rate limit, timeout, offline,
+/// service down): a success is saved with its `fetched_at`; a failure gets the saved value attached
+/// as `stale`, so the widget keeps showing the numbers, marked with their time. Display-only: the
+/// saved value never triggers a fetch.
+fn with_last_good(name: &str, mut v: Value, ok: bool) -> Value {
     let Some(dir) = tokens::cache_dir(&home()) else { return v };
-    let path = dir.join("claude-usage-last.json");
-    if v.get("windows").is_some() {
+    if ok {
         v["fetched_at"] = json!(now());
-        write_private(&dir, "claude-usage-last.json", v.to_string().as_bytes());
-    } else if v.get("error").is_some() {
-        if let Some(prev) = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
-            if prev.get("windows").is_some() { v["stale"] = prev; }
-        }
+        write_private(&dir, name, v.to_string().as_bytes());
+    } else if let Some(prev) = read_json(&dir.join(name)).filter(|p| p.is_object() && p.get("error").is_none()) {
+        v["stale"] = prev;
     }
     v
 }
@@ -917,7 +925,7 @@ fn codex_emit(tx: &Tx, id: u64, r: Option<Result<Value, String>>, date: &str) {
             }
             _ => json!({ "logged_in": false }),
         }),
-        LIMITS_READ => ("codex.usage", match r {
+        LIMITS_READ => ("codex.usage", last_good_part("codex-usage-last.json", match r {
             Some(Ok(rl)) => {
                 let main = &rl["rateLimits"];
                 let credits = &main["credits"];
@@ -931,16 +939,19 @@ fn codex_emit(tx: &Tx, id: u64, r: Option<Result<Value, String>>, date: &str) {
             }
             Some(Err(e)) => json!({ "error": format!("Could not read limits: {e}") }),
             None => codex_unreachable(),
-        }),
-        USAGE_READ => ("codex.tokens", match r {
+        })),
+        USAGE_READ => ("codex.tokens", last_good_part("codex-tokens-last.json", match r {
             Some(Ok(u)) => {
                 let buckets = u["dailyUsageBuckets"].as_array().cloned().unwrap_or_default();
                 let today = buckets.iter().find(|b| b["startDate"] == date).and_then(|b| b["tokens"].as_u64()).unwrap_or(0);
                 let last7: u64 = buckets.iter().rev().take(7).filter_map(|b| b["tokens"].as_u64()).sum();
                 json!({ "today": today, "last_7_days": last7, "lifetime": u["summary"]["lifetimeTokens"] })
             }
-            _ => Value::Null,
-        }),
+            // OpenAI's token history is the slowest call (seconds at times); past the read timeout
+            // the saved totals are shown instead.
+            Some(Err(e)) => json!({ "error": format!("Codex token totals did not load: {e}") }),
+            None => json!({ "error": "Codex is not reachable" }),
+        })),
         RELAY_READ => ("codex.relay", match r {
             Some(Ok(s)) => json!({ "status": s["status"], "name": s["serverName"] }),
             _ => json!({ "status": "unknown" }),
@@ -948,6 +959,12 @@ fn codex_emit(tx: &Tx, id: u64, r: Option<Result<Value, String>>, date: &str) {
         _ => return,
     };
     let _ = tx.send(part);
+}
+
+/// A Codex part with the last-good fallback: anything without an `error` counts as a success.
+fn last_good_part(name: &str, v: Value) -> Value {
+    let ok = v.get("error").is_none();
+    with_last_good(name, v, ok)
 }
 
 /// Codex account, limits, token totals and relay status from its app-server. Each result is sent

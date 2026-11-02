@@ -118,6 +118,11 @@ export default class HarnessExtension extends Extension {
         setScenario('many'); await both('13-many');
         setScenario('partial'); await both('14-partial');
         setScenario('history'); await both('15-history');
+        setScenario('codexstale'); open(); await sleep(900); tab('codex'); await sleep(900);
+        await shotActor('15c-codex-saved-values', menu());
+        check(!!ind._models.codex.tokens?.staleAt && !!ind._models.codex.usage?.staleAt &&
+              ind._models.codex.usage.windows.length > 0, 'Codex limits and tokens keep their saved values when a fetch fails');
+        tab('claude'); await sleep(300); close(); await sleep(300);
         setScenario('claudeoff'); open(); await sleep(1200); await shotActor('15b-claude-limits-off', menu());
         check(ind._models.claude.usage.off === true && ind._models.claude.level === 'ok', 'live Claude limits off: calm notice, no warning');
         close(); await sleep(300);

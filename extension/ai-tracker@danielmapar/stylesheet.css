@@ -407,3 +407,6 @@
 .au-footer-status.au-footer-ok { color: #93e9b4; }
 .au-action-box { spacing: 3px; }
 .au-action-error { font-size: 0.76em; color: #ffaeae; padding-left: 2px; }
+
+/* last good values shown because a live fetch failed ("saved 14:32") */
+.au-section-aside.au-section-stale { color: #f6c453; }
