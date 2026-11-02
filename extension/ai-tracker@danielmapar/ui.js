@@ -43,14 +43,28 @@ const CODEX_TIMER = 'codex-remote-control.timer';
 // URL after an update) never hits "type name already registered".
 const UID = GLib.uuid_string_random().replaceAll('-', '').slice(0, 12);
 
+// Switching accounts signs out first: `login` alone re-approves whatever account the browser is
+// signed in to. The scripts are fixed text; the tool's path is their only argument ("$0").
+const switchScript = (logout, login, site) => [
+    `"$0" ${logout} || { printf '\\nSign-out failed. Press Enter to close.'; read -r _; exit 1; }`,
+    `printf '\\nSigned out. Opening the sign-in page: choose the account you want there.\\n'`,
+    `printf 'If it goes straight to the old account, sign out of ${site} in your browser and run: %s ${login}\\n\\n' "$0"`,
+    `"$0" ${login}`,
+    `printf '\\nPress Enter to close.'; read -r _`,
+].join('\n');
+
 const TABS = [
     {
         key: 'claude', name: 'Claude', iconFile: 'claude-symbolic.svg',
-        fallbackIcons: ['starred-symbolic'], login: ['claude', 'auth', 'login'],
+        fallbackIcons: ['starred-symbolic'], tool: 'claude', login: ['auth', 'login'],
+        switchScript: switchScript('auth logout', 'auth login', 'claude.ai'),
+        switchWarning: 'Signs out every Claude Code session on this computer, then opens sign-in.',
     },
     {
         key: 'codex', name: 'Codex', iconFile: 'codex-symbolic.svg',
-        fallbackIcons: ['utilities-terminal-symbolic'], login: ['codex', 'login'],
+        fallbackIcons: ['utilities-terminal-symbolic'], tool: 'codex', login: ['login'],
+        switchScript: switchScript('logout', 'login', 'chatgpt.com'),
+        switchWarning: 'Signs out Codex on this computer (phone access too), then opens sign-in.',
     },
 ];
 const PANEL_ICON = {
@@ -1051,6 +1065,7 @@ const AgentUsageIndicator = GObject.registerClass({
         this._actionErr = null; // {id, text} error of the last failed fix, shown under its button
         this._recheckId = 0;
         this._snapCancel = null;
+        this._armed = new Set(); // disarm functions of two-step buttons waiting for their second click
 
         this._buildPanelButton();
         this._buildMenu();
@@ -1201,6 +1216,9 @@ const AgentUsageIndicator = GObject.registerClass({
             this._refresh();
         } else {
             this._stopTick();
+            // A warning armed before the menu closed must not carry over to the next open.
+            for (const disarm of [...this._armed])
+                disarm();
             if (this._actionMsg && this._actionMsg.level !== 'busy') {
                 this._actionMsg = null;
                 this._actionErr = null;
@@ -1315,6 +1333,10 @@ const AgentUsageIndicator = GObject.registerClass({
             this._watchdogId = 0;
             timedOut = true;
             proc.force_exit();
+            // End the run now rather than at end-of-output: a child process that inherited the pipe
+            // could hold it open, leaving the menu "Updating…" and Refresh ignored until it exits.
+            cancellable.cancel();
+            finish(null);
             return GLib.SOURCE_REMOVE;
         });
         this._syncAnimations();
@@ -1755,8 +1777,48 @@ const AgentUsageIndicator = GObject.registerClass({
             can_focus: true, y_align: ALIGN.CENTER,
             accessible_name: a.loggedIn ? `Switch ${tab.name} account` : `Log in to ${tab.name}`,
         });
-        button.connect('clicked', () => this._openTerminal(tab.login));
-        return add(row, avatar, text, button);
+        if (!a.loggedIn) {
+            button.connect('clicked', () => this._openTerminal([this._tool(tab.tool), ...tab.login]));
+            return add(row, avatar, text, button);
+        }
+        // Signing out ends every session of that tool on this computer, so the first click only arms
+        // the button and says so (full width, under the row); a second click within CONFIRM_MS opens
+        // the terminal.
+        const warning = wrapped(`${tab.switchWarning} Click Confirm to go ahead.`, 'au-account-warning');
+        warning.visible = false;
+        let armedId = 0;
+        const disarm = () => {
+            this._armed.delete(disarm);
+            if (armedId)
+                GLib.source_remove(armedId);
+            armedId = 0;
+            button.label = 'Switch…';
+            button.remove_style_class_name('au-button-armed');
+            warning.visible = false;
+        };
+        button.connect('clicked', () => {
+            if (!armedId) {
+                this._armed.add(disarm);
+                button.label = 'Confirm';
+                button.add_style_class_name('au-button-armed');
+                warning.visible = true;
+                armedId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONFIRM_MS, () => {
+                    armedId = 0;
+                    disarm();
+                    return GLib.SOURCE_REMOVE;
+                });
+                return;
+            }
+            disarm();
+            this._openTerminal(['sh', '-c', tab.switchScript, this._tool(tab.tool)]);
+        });
+        button.connect('destroy', () => {
+            this._armed.delete(disarm);
+            if (armedId)
+                GLib.source_remove(armedId);
+            armedId = 0;
+        });
+        return add(vbox('au-account-box', {x_expand: true}), add(row, avatar, text, button), warning);
     }
 
     _section(title, aside, loading = false, stale = false) {
@@ -2083,6 +2145,7 @@ const AgentUsageIndicator = GObject.registerClass({
             b.add_style_pseudo_class('insensitive');
         let armedId = 0;
         const disarm = () => {
+            this._armed.delete(disarm);
             if (armedId)
                 GLib.source_remove(armedId);
             armedId = 0;
@@ -2093,6 +2156,7 @@ const AgentUsageIndicator = GObject.registerClass({
             if (this._actionBusy)
                 return;
             if (a.confirm && !armedId) {
+                this._armed.add(disarm);
                 b.label = a.confirm;
                 b.add_style_class_name('au-row-action-armed');
                 armedId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONFIRM_MS, () => {
@@ -2106,6 +2170,7 @@ const AgentUsageIndicator = GObject.registerClass({
             this._runAction(a);
         });
         b.connect('destroy', () => {
+            this._armed.delete(disarm);
             if (armedId)
                 GLib.source_remove(armedId);
             armedId = 0;
@@ -2222,9 +2287,13 @@ const AgentUsageIndicator = GObject.registerClass({
 
     // ---------- actions (terminal logic kept from the original extension) ----------
 
-    _openTerminal(argv) {
-        const exe = GLib.build_filenamev([HOME, '.local', 'bin', argv[0]]);
-        const cmd = [GLib.file_test(exe, GLib.FileTest.IS_EXECUTABLE) ? exe : argv[0], ...argv.slice(1)];
+    // ~/.local/bin/<name> when it is there (where Claude Code and Codex install), else the bare name.
+    _tool(name) {
+        const exe = GLib.build_filenamev([HOME, '.local', 'bin', name]);
+        return GLib.file_test(exe, GLib.FileTest.IS_EXECUTABLE) ? exe : name;
+    }
+
+    _openTerminal(cmd) {
         let full;
         if (GLib.find_program_in_path('ghostty'))
             full = ['ghostty', '-e', ...cmd];
@@ -2253,6 +2322,7 @@ const AgentUsageIndicator = GObject.registerClass({
 
     _onDestroyed() {
         this._destroyed = true;
+        this._armed.clear();
         this._stopTick();
         this._clearWatchdog();
         if (this._recheckId)

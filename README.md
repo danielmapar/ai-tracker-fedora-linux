@@ -82,8 +82,8 @@ A small Rust program (`collector/`) gathers everything and prints JSON. The GNOM
 
 ```sh
 agent-usage --pretty    # one snapshot (contains your account emails: don't share it)
-sh verify/run.sh        # UI tests in a sandboxed headless GNOME Shell, with made-up data
-sh verify/watchdog-test.sh  # Codex watchdog tests in a sandbox (fake Codex, fake databases)
+sh verify/test-all.sh   # every test: collector, watchdog and widget end-to-end, all sandboxed
+sh verify/e2e.sh        # just the widget end-to-end suite (headless GNOME Shell, made-up data)
 sh verify/demo.sh       # re-record docs/demo.gif (needs ffmpeg and Pillow)
 ```
 

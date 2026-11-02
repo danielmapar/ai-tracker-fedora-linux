@@ -7,6 +7,8 @@
 # Output: verify/out/*.png and verify/out/shell.log.   Usage: sh verify/run.sh [font-size]
 # verify/demo.sh reuses this with AU_HARNESS (driver script), AU_OUT_DIR, AU_SNAPSHOT (scenario saved
 # as the "last snapshot") and AU_BACKGROUND (solid desktop colour) to record docs/demo.gif.
+# verify/e2e.sh adds AU_TIMEOUT (seconds, default 260) and AU_EXTRA_SCENARIOS (a folder of extra
+# scenario files, e.g. the real collector's output from verify/e2e/collector_e2e.py).
 set -eu
 V=$(cd "$(dirname "$0")" && pwd)
 UI=$(dirname "$V")/extension/ai-tracker@danielmapar   # the extension source
@@ -24,6 +26,7 @@ printf '{"uuid":"agent-usage-test@local","name":"AU harness","description":"test
 install -m 755 "$V/fake-collector.sh" "$BOX/home/.local/bin/agent-usage"
 mkdir -p "$BOX/home/fakebin" && install -m 755 "$V"/fakebin/* "$BOX/home/fakebin/"
 python3 -I "$V/scenarios.py" "$V/sample.json" "$BOX/home/scenarios" >/dev/null
+[ -n "${AU_EXTRA_SCENARIOS:-}" ] && [ -d "$AU_EXTRA_SCENARIOS" ] && { cp "$AU_EXTRA_SCENARIOS"/* "$BOX/home/scenarios/" 2>/dev/null || true; }
 # a saved snapshot from an earlier login (heavy: the badge must show before any fetch)
 mkdir -p "$BOX/home/.cache/agent-usage" && cp "$BOX/home/scenarios/${AU_SNAPSHOT:-snapshot-heavy}.json" "$BOX/home/.cache/agent-usage/last-snapshot.json"
 ICONS=${AU_ICONS:-$UI/icons}   # real icons for the second half
@@ -45,11 +48,11 @@ KEY
 B=$BOX/home
 setsid env -i PATH="$BOX/home/fakebin:/usr/bin:/bin" HOME="$B" USER="$(id -un)" LOGNAME="$(id -un)" LANG=C.UTF-8 \
   XDG_RUNTIME_DIR="$RUN" XDG_CONFIG_HOME="$B/.config" XDG_DATA_HOME="$B/.local/share" \
-  XDG_CACHE_HOME="$B/.cache" XDG_STATE_HOME="$B/.local/state" GSETTINGS_BACKEND=keyfile AU_OUT="$OUT" \
-  timeout 260 dbus-run-session -- gnome-shell --headless --wayland --no-x11 --virtual-monitor 1600x1200 \
+  XDG_CACHE_HOME="$B/.cache" XDG_STATE_HOME="$B/.local/state" GSETTINGS_BACKEND=keyfile AU_OUT="$OUT" AU_E2E_ONLY="${AU_E2E_ONLY:-}" \
+  timeout "${AU_TIMEOUT:-260}" dbus-run-session -- gnome-shell --headless --wayland --no-x11 --virtual-monitor 1600x1200 \
   > "$OUT/shell.log" 2>&1 &
 PID=$!
-i=0; while [ ! -f "$OUT/DONE" ] && [ $i -lt 260 ] && kill -0 $PID 2>/dev/null; do i=$((i+1)); sleep 1; done
+i=0; while [ ! -f "$OUT/DONE" ] && [ $i -lt "${AU_TIMEOUT:-260}" ] && kill -0 $PID 2>/dev/null; do i=$((i+1)); sleep 1; done
 kill -TERM -$PID 2>/dev/null || true; sleep 2; kill -KILL -$PID 2>/dev/null || true
 echo "result: $(cat "$OUT/DONE" 2>/dev/null || echo 'no DONE marker')  ($i s)"
 echo "collector runs: $(grep -c start "$B/scenarios/runs.log" 2>/dev/null || echo 0)  refresh triggers: $(grep -c 'AUHARNESS refresh' "$OUT/shell.log")"

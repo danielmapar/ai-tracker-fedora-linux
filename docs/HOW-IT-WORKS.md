@@ -9,8 +9,15 @@
 ## What each tab shows
 
 - **Health line.** For example "Remote access healthy" or "5-hour at 92% · 3 remote issues".
-- **Account and plan.** A button opens a terminal with `claude auth login` or `codex login`. A Max 20x
-  login shows as Ultra, the plan's name since 30 October 2026; the login files still say `max`.
+- **Account and plan.** A Max 20x login shows as Ultra, the plan's name since 30 October 2026; the
+  login files still say `max`.
+  - Signed out: **Log in…** opens a terminal with `claude auth login` or `codex login`.
+  - Signed in: **Switch…** asks once, since signing out ends that tool's sessions on this computer.
+    Then it opens a terminal that signs out (`claude auth logout` / `codex logout`) and signs in again,
+    so the browser can offer another account. A plain `login` would just approve the account the
+    browser is already signed in to.
+  - The widget never handles a login itself: it only reads what Claude Code and Codex saved, and
+    the official tools do the signing in.
 - **Plan limits.** A ring per limit window shows:
   - the percentage used;
   - a reset countdown;
@@ -29,7 +36,8 @@
   - replace a stray Codex server;
   - turn the watchdog back on.
 
-  A fix that would end running sessions asks for a second click and says what it ends.
+  A fix that would end running sessions asks for a second click and says what it ends. Closing
+  the menu cancels a pending second click.
 - **Top-bar dot.** Amber or red when the last check found a problem. At login it comes from the saved
   snapshot, without a fetch.
 
@@ -119,23 +127,35 @@ The only timers are UI timers:
 
 ## Testing
 
-`verify/run.sh` starts a headless GNOME Shell 50 as your user, with its own D-Bus session, HOME and
-settings, a fake collector serving made-up scenarios, and a fake `systemctl`. It goes through every
-state, including:
+`sh verify/test-all.sh` runs every suite, then prints a summary. All of them are sandboxed, with
+made-up data. Nothing signs in or out, opens a browser, changes a service or calls a network API.
 
-- streaming and the saved snapshot;
-- errors;
-- the fix buttons and the two-step confirm;
-- live limits off.
+| Suite | What it runs | What it checks |
+| --- | --- | --- |
+| collector unit tests | `cargo test` | plan names, limit windows, the relay-holder note |
+| collector end-to-end | `verify/e2e/collector_e2e.py`: the real binary in a throwaway HOME with fake `systemctl` / `journalctl`, a fake Codex service on the real socket path, and stand-in processes | every field it reports, streaming order, incremental journal reads, saved-value fallbacks, the private Codex fallback, and that it is read-only, never leaks the login token and keeps its cache private |
+| Codex watchdog | `verify/watchdog-test.sh`: fake Codex, fake Codex databases, a stand-in service | misses and the restart, recovery, and a relay held by another Codex app |
+| widget end-to-end | `verify/e2e.sh`: `verify/e2e/widget-e2e.js` in a real headless GNOME Shell 50 | below |
+| widget visual walk-through | `verify/run.sh` | a screenshot of every state, in `verify/out/` |
 
-It writes screenshots and pass/fail checks to `verify/out/` and never touches your real extension,
-services or settings.
+The widget end-to-end suite clicks real buttons and checks what is on screen and which commands
+run. Fake terminals, `systemctl` and `systemd-run` only record what they were asked to run. It
+covers:
 
-`verify/demo.sh` records `docs/demo.gif` the same way, driving the widget with a virtual mouse.
+- **Fetching:** only on open and Refresh; nothing while closed.
+- **Streaming and errors:** dead, garbage, hung or missing collector.
+- **Tabs and account:** including Log in… and Switch…. The switch script also runs against a fake
+  `claude`, to check it signs out, then in, and stops if sign-out fails.
+- **Data:** every limit, token and remote-access state, every fix button with its two-step confirm,
+  and the summary and panel dot.
+- **The real collector's output:** the end-to-end run's stream.
+- **Speed:** redraw and tab-switch times.
+- **Lifecycle:** reloading in place, destroying mid-run, no saved snapshot.
 
-`verify/watchdog-test.sh` runs the Codex watchdog against a fake Codex, fake Codex databases and a
-stand-in service in a temporary HOME. It covers the relay checks: misses and the restart, recovery,
-and a relay held by another Codex app.
+`AU_E2E_ONLY='Account|Limits' sh verify/e2e.sh` runs a subset. It writes one screenshot per test and
+`e2e-results.json` to `verify/out-e2e/`.
+
+`verify/demo.sh` records `docs/demo.gif` in the same sandbox, driving the widget with a virtual mouse.
 
 Collector flags and variables:
 

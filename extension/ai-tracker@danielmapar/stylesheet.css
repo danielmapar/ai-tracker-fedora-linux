@@ -395,6 +395,8 @@
 .au-codex .au-row-action { background-color: rgba(47, 200, 181, 0.28); }
 .au-codex .au-row-action:hover { background-color: rgba(47, 200, 181, 0.42); }
 .au-root .au-row-action.au-row-action-armed { color: #ffe1a0; background-color: rgba(246, 196, 83, 0.26); }
+.au-root .au-button.au-button-armed { color: #ffe1a0; background-color: rgba(246, 196, 83, 0.26); }
+.au-account-warning { font-size: 0.8em; color: #f6c453; padding: 7px 4px 0 4px; }
 .au-row-action:focus { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.4); }
 .au-root .au-row-action:insensitive { color: rgba(255, 255, 255, 0.5); background-color: rgba(255, 255, 255, 0.07); }
 

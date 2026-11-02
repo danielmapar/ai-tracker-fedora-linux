@@ -2,6 +2,8 @@
 /collector/target/
 /verify/out/
 /verify/out-demo/
+/verify/out-e2e/
+__pycache__/
 # builds install.sh writes next to the extension (if the extension dir is a symlink to this checkout)
 /extension/*/ui-*.js
 /extension/*/ui-current

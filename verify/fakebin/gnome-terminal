@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sandbox stand-in: records the terminal command (NUL-separated, in terminal-last.args) instead of
+# opening a terminal or running anything.
+d="$HOME/scenarios"
+printf '%s\0' "$(basename "$0")" "$@" > "$d/terminal-last.args"
+echo "terminal $(basename "$0")" >> "$d/actions.log"
