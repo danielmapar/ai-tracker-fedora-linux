@@ -1,5 +1,5 @@
 #!/bin/sh
-# Visual + behavioural check of extension/ai-tracker@danielmapar/ui.js in a REAL GNOME Shell 50, sandboxed:
+# Visual + behavioural check of extension/ai-tracker@danielmapar/ui.js in a REAL GNOME Shell (50 or 51), sandboxed:
 #   headless compositor (no window on your desktop), private D-Bus session, throwaway HOME/XDG
 #   dirs, keyfile GSettings, a fake collector serving scenarios from verify/sample.json and a fake
 #   systemctl. It runs as your user and can still see the system bus (logind).
@@ -37,7 +37,7 @@ mkdir -p "$OUT" "$EXT" "$BOX/home/.local/bin" "$BOX/home/scenarios" "$BOX/home/.
 chmod 700 "$RUN"; rm -f "$OUT"/*.png "$OUT/DONE"
 cp "$UI/ui.js" "$UI/stylesheet.css" "$EXT/"
 cp "${AU_HARNESS:-$V/harness-extension.js}" "$EXT/extension.js"
-printf '{"uuid":"agent-usage-test@local","name":"AU harness","description":"test","shell-version":["50"]}' > "$EXT/metadata.json"
+printf '{"uuid":"agent-usage-test@local","name":"AU harness","description":"test","shell-version":["50","51"]}' > "$EXT/metadata.json"
 install -m 755 "$V/fake-collector.sh" "$BOX/home/.local/bin/agent-usage"
 install -m 755 "$(dirname "$V")/app/ai-tracker" "$BOX/home/.local/bin/ai-tracker"   # the real app script
 mkdir -p "$BOX/home/fakebin" && install -m 755 "$V"/fakebin/* "$BOX/home/fakebin/"

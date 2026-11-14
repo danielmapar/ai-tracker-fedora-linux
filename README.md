@@ -37,7 +37,7 @@ It fetches only when you open it, never in the background.
 
 You need:
 
-- GNOME Shell 50 on Wayland (tested on Fedora 44);
+- GNOME Shell 50 or 51 on Wayland (tested on Fedora 44 and 45);
 - Rust;
 - Claude Code (`claude`) and/or Codex (`codex`) in `~/.local/bin`, logged in.
 

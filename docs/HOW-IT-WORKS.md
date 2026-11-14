@@ -155,7 +155,7 @@ made-up data. Nothing signs in or out, opens a browser, changes a service or cal
 | collector end-to-end | `verify/e2e/collector_e2e.py`: the real binary in a throwaway HOME with fake `systemctl` / `journalctl`, a fake Codex service on the real socket path, and stand-in processes | every field it reports, streaming order, incremental journal reads, saved-value fallbacks, the private Codex fallback, and that it is read-only, never leaks the login token and keeps its cache private |
 | Codex watchdog | `verify/watchdog-test.sh`: fake Codex, fake Codex databases, a stand-in service | misses and the restart, recovery, and a relay held by another Codex app |
 | app | `verify/app-test.sh`: `app/ai-tracker` against a fake `gdbus` (GNOME Shell's extensions interface) and a fake `notify-send` | open when running, quit, open after quit, never a second copy, every failure message, the desktop entry |
-| widget end-to-end | `verify/e2e.sh`: `verify/e2e/widget-e2e.js` in a real headless GNOME Shell 50 | below |
+| widget end-to-end | `verify/e2e.sh`: `verify/e2e/widget-e2e.js` in a real headless GNOME Shell | below |
 | widget visual walk-through | `verify/run.sh` | a screenshot of every state, in `verify/out/` |
 
 The widget end-to-end suite clicks real buttons and checks what is on screen and which commands
