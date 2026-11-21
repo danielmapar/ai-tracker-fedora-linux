@@ -81,9 +81,10 @@ export default class HarnessExtension extends Extension {
         const open = () => ind.menu.open(false);
         const close = () => ind.menu.close(false);
         const tab = k => ind._selectTab(k);
-        const both = async (name, wait = 1200) => {
+        const allTabs = async (name, wait = 1200) => {
             open(); await sleep(wait); await shotActor(`${name}-claude`, menu());
             tab('codex'); await sleep(900); await shotActor(`${name}-codex`, menu());
+            tab('gemini'); await sleep(900); await shotActor(`${name}-gemini`, menu());
             tab('claude'); await sleep(300); close(); await sleep(300);
         };
         const runs = () => (readText(`${SC}/runs.log`).match(/^start/gm) ?? []).length;
@@ -107,17 +108,18 @@ export default class HarnessExtension extends Extension {
         check(runs() === 1 && readText(`${SC}/runs.log`).includes('--stream'), 'one --stream run per open');
 
         // 2. existing states (single-frame collector output)
-        setScenario('healthy'); await both('07-healthy');
+        setScenario('healthy'); await allTabs('07-healthy');
+        check(ind._models.gemini?.level === 'ok' && ind._models.gemini?.account.plan === 'Ultra', 'Gemini tab healthy with Ultra plan');
         setScenario('two', 1.0);
         open(); await sleep(350); await shotActor('08-stale-updating', menu());
         await sleep(1300); await shotActor('09-two-claude', menu()); close(); await sleep(300);
-        setScenario('heavy'); await both('10-heavy');
+        setScenario('heavy'); await allTabs('10-heavy');
         await shotActor('10-panel-badge', Main.panel.statusArea[this.uuid], 6);
-        setScenario('loggedout'); await both('11-loggedout');
-        setScenario('apierror'); await both('12-apierror');
-        setScenario('many'); await both('13-many');
-        setScenario('partial'); await both('14-partial');
-        setScenario('history'); await both('15-history');
+        setScenario('loggedout'); await allTabs('11-loggedout');
+        setScenario('apierror'); await allTabs('12-apierror');
+        setScenario('many'); await allTabs('13-many');
+        setScenario('partial'); await allTabs('14-partial');
+        setScenario('history'); await allTabs('15-history');
         setScenario('codexstale'); open(); await sleep(900); tab('codex'); await sleep(900);
         await shotActor('15c-codex-saved-values', menu());
         check(!!ind._models.codex.tokens?.staleAt && !!ind._models.codex.usage?.staleAt &&
@@ -174,7 +176,7 @@ export default class HarnessExtension extends Extension {
         ind.destroy(); await sleep(300);
         GLib.unlink(`${HOME}/.cache/agent-usage/last-snapshot.json`);
         GLib.mkdir_with_parents(`${this.path}/icons`, 0o755);
-        for (const f of ['agent-usage-symbolic.svg', 'claude-symbolic.svg', 'codex-symbolic.svg'])
+        for (const f of ['agent-usage-symbolic.svg', 'claude-symbolic.svg', 'codex-symbolic.svg', 'gemini-symbolic.svg'])
             Gio.File.new_for_path(`${HOME}/icons-src/${f}`).copy(Gio.File.new_for_path(`${this.path}/icons/${f}`), Gio.FileCopyFlags.OVERWRITE, null, null);
         ind = await this._load('?v=2');
         instrument(ind);
@@ -184,7 +186,8 @@ export default class HarnessExtension extends Extension {
         setScenario('firstever');
         open(); await sleep(400); await shotActor('26-firstever-claude', menu());
         tab('codex'); await sleep(300); await shotActor('27-firstever-codex', menu());
-        await sleep(1500); await shotActor('28-firstever-done-codex', menu());
+        tab('gemini'); await sleep(200); await shotActor('27b-firstever-gemini', menu());
+        await sleep(1300); await shotActor('28-firstever-done-gemini', menu());
         tab('claude'); close(); await sleep(300);
         ind.destroy(); await sleep(300);
         ind = await this._load('?v=3');
@@ -201,7 +204,7 @@ export default class HarnessExtension extends Extension {
         setScenario('healthy', 0.2); open(); await sleep(1600); await shotActor('32-recovered', menu());
         setScenario('two', 1.0); ind._refreshButton.emit('clicked', 1); await sleep(250); await shotActor('33-refresh-click', menu());
         await sleep(1600); await shotActor('34-refresh-done', menu()); close();
-        setScenario('heavy', 0.2); await both('35-heavy-icons', 1300);
+        setScenario('heavy', 0.2); await allTabs('35-heavy-icons', 1300);
         await shotActor('35-panel-badge-icons', Main.panel.statusArea[`${this.uuid}?v=3`], 6);
         // 8. destroy while a stream is in flight
         setScenario('stream'); open(); await sleep(300); ind.destroy(); await sleep(1500);

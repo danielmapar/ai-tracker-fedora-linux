@@ -34,6 +34,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 const HOME = GLib.get_home_dir();
 const COLLECTOR = GLib.build_filenamev([HOME, '.local', 'bin', 'agent-usage']);
 const CODEX_BIN = GLib.build_filenamev([HOME, '.local', 'bin', 'codex']);
+const AGY_BIN = GLib.build_filenamev([HOME, '.local', 'bin', 'agy']);
 const SNAPSHOT = GLib.build_filenamev([GLib.get_user_cache_dir(), 'agent-usage', 'last-snapshot.json']);
 const COLLECTOR_TIMEOUT_S = 25; // the collector has its own 10 s timeouts; this only catches a hang
 const CLOCK_TICK_S = 30; // countdown text refresh while the menu is open (no fetching)
@@ -44,6 +45,7 @@ const CONFIRM_MS = 4000; // how long a two-step button stays armed
 const CLAUDE_UNIT = 'claude-remote-control.service';
 const CODEX_UNIT = 'codex-remote-control.service'; // the watchdog: starts/repairs the Codex service
 const CODEX_TIMER = 'codex-remote-control.timer';
+const GEMINI_UNIT = 'antigravity-cli-daemon.service';
 
 // Unique GType names per module instance, so a loader that re-imports this file (cache-busting
 // URL after an update) never hits "type name already registered".
@@ -68,6 +70,14 @@ const switchScript = (logout, login, site) => [
     `printf '\\nPress Enter to close.'; read -r _`,
 ].join('\n');
 
+const geminiSwitchScript = [
+    `secret-tool clear service gemini username antigravity || { printf '\\nSign-out failed. Press Enter to close.'; read -r _; exit 1; }`,
+    `printf '\\nSigned out. Opening the sign-in page: choose the account you want there.\\n'`,
+    `printf 'If it goes straight to the old account, sign out of accounts.google.com in your browser and run: %s\\n\\n' "$0"`,
+    `"$0"`,
+    `printf '\\nPress Enter to close.'; read -r _`,
+].join('\n');
+
 const TABS = [
     {
         key: 'claude', name: 'Claude', iconFile: 'claude-symbolic.svg',
@@ -80,6 +90,12 @@ const TABS = [
         fallbackIcons: ['utilities-terminal-symbolic'], tool: 'codex', login: ['login'],
         switchScript: switchScript('logout', 'login', 'chatgpt.com'),
         switchWarning: 'Signs out Codex on this computer (phone access too), then opens sign-in.',
+    },
+    {
+        key: 'gemini', name: 'Gemini', iconFile: 'gemini-symbolic.svg',
+        fallbackIcons: ['weather-clear-night-symbolic', 'starred-symbolic'], tool: 'agy', login: [],
+        switchScript: geminiSwitchScript,
+        switchWarning: 'Signs out Gemini (Antigravity) on this computer, then opens sign-in.',
     },
 ];
 const PANEL_ICON = {
@@ -169,13 +185,18 @@ const clip = (v, n = 240) => {
     return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
-// The only links the widget opens or copies: https://claude.ai/...
-function claudeLink(v) {
+// The only links the widget opens or copies: https://claude.ai/... and https://antigravity.google.com/...
+const ALLOWED_LINK_HOSTS = new Set(['claude.ai', 'antigravity.google.com']);
+
+function safeLink(v, expectedHost = null) {
     if (typeof v !== 'string' || v.length > 512)
         return null;
     try {
         const u = GLib.Uri.parse(v, GLib.UriFlags.NONE);
-        return u.get_scheme() === 'https' && u.get_host() === 'claude.ai' ? v : null;
+        const host = u.get_host();
+        if (u.get_scheme() !== 'https' || !ALLOWED_LINK_HOSTS.has(host))
+            return null;
+        return !expectedHost || host === expectedHost ? v : null;
     } catch {
         return null;
     }
@@ -185,17 +206,20 @@ const titleCase = s => `${s ?? ''}`.replace(/_/g, ' ').replace(/(^|\s|-)\w/g, m 
 
 const PLAN_NAMES = {
     ultra: 'Ultra', max: 'Max', pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', enterprise: 'Enterprise',
-    free: 'Free', business: 'Business', edu: 'Edu', go: 'Go',
+    standard: 'Standard', free: 'Free', business: 'Business', edu: 'Edu', go: 'Go',
 };
 
 function planName(plan) {
     if (!plan)
         return null;
-    const k = `${plan}`.toLowerCase().replace(/[\s_-]/g, '').replace(/^claude/, '');
+    const k = `${plan}`.toLowerCase().replace(/[\s_-]/g, '').replace(/^(claude|googleai|google|gemini)/, '');
     return PLAN_NAMES[k] ?? titleCase(plan);
 }
 
-const AUTH_LABELS = {'claude.ai': 'claude.ai login', chatgpt: 'ChatGPT login', apikey: 'API key'};
+const AUTH_LABELS = {
+    'claude.ai': 'claude.ai login', chatgpt: 'ChatGPT login', google: 'Google login',
+    enterprise: 'Enterprise SSO', adc: 'Google Cloud ADC', apikey: 'API key',
+};
 
 function authLabel(method) {
     if (!method)
@@ -270,10 +294,16 @@ function resetText(w) {
     return `Resets in ${fmtDuration(left)}`;
 }
 
+const LOGIN_HINTS = {
+    claude: 'Log in to Claude Code to see your limits',
+    codex: 'Log in to Codex to see your limits',
+    gemini: 'Log in to Antigravity to see your limits',
+};
+
 function accountModel(key, acc) {
     acc = acc && typeof acc === 'object' ? acc : {};
     if (acc.logged_in) {
-        const method = authLabel(key === 'claude' ? acc.auth_method : acc.type);
+        const method = authLabel(key === 'codex' ? acc.type : acc.auth_method);
         const org = acc.org && acc.org !== acc.email ? `${acc.org}` : null;
         return {
             loggedIn: true,
@@ -288,7 +318,7 @@ function accountModel(key, acc) {
         loggedIn: false,
         title: 'Not signed in',
         plan: null,
-        meta: key === 'claude' ? 'Log in to Claude Code to see your limits' : 'Log in to Codex to see your limits',
+        meta: LOGIN_HINTS[key] ?? 'Log in to see your limits',
     };
 }
 
@@ -342,7 +372,7 @@ function tokensModel(key, t) {
         // A saved "today" from an earlier day is not today's count.
         t = Number.isFinite(at) && at < localMidnight() ? {...s, today: null} : s;
     }
-    if (key === 'claude') {
+    if (key === 'claude' || key === 'gemini') {
         const total = num(t.today_total);
         if (!Number.isFinite(total))
             return null;
@@ -379,7 +409,7 @@ function tokensModel(key, t) {
 
 // Today's history of a worker for its timeline strip: when it has been up since, and incidents.
 // `text(now)` is evaluated live (the uptime keeps counting while the menu is open).
-function claudeHistory(srv, loading = false) {
+function serverHistory(srv, loading = false, part = 'claude.drops') {
     const since = num(srv.since);
     const drops = Array.isArray(srv.drops_today)
         ? srv.drops_today.filter(d => d && Number.isFinite(num(d.at))).map(d => ({at: num(d.at), secs: num(d.secs) || 0}))
@@ -405,7 +435,7 @@ function claudeHistory(srv, loading = false) {
         return parts.join(' · ');
     };
     return {
-        up: srv.service_active && Number.isFinite(since) ? since : null, marks, text, parts: ['claude.drops'],
+        up: srv.service_active && Number.isFinite(since) ? since : null, marks, text, parts: [part],
         count: drops?.length ?? 0, sig: JSON.stringify([srv.drops_today ?? null, srv.since ?? null, !!srv.service_active]),
     };
 }
@@ -456,7 +486,7 @@ function claudeWorkers(w, pending = new Set()) {
     const srv = w.server && typeof w.server === 'object' ? w.server : {};
     const state = srv.state ? `${srv.state}` : null;
     const capacity = srv.capacity ? `${srv.capacity} sessions` : null;
-    const history = claudeHistory(srv, pending.has('claude.drops'));
+    const history = serverHistory(srv, pending.has('claude.drops'), 'claude.drops');
     const server = {icon: 'network-server-symbolic', name: 'Phone & web sessions', history};
     const restart = argvLabel => {
         const n = sessionsInUse(srv.capacity);
@@ -519,8 +549,8 @@ function claudeWorkers(w, pending = new Set()) {
             detail: 'New sessions stay local', issue: 'Auto-connect off',
         });
 
-    const link = claudeLink(srv.link);
-    return {rows, link};
+    const link = safeLink(srv.link, 'claude.ai');
+    return {rows, link, linkLabel: 'Open environment in browser'};
 }
 
 function codexWorkers(w, pending = new Set()) {
@@ -594,19 +624,89 @@ function codexWorkers(w, pending = new Set()) {
             icon: 'network-wired-symbolic', name: 'SSH for the Codex app', level: 'bad',
             detail: 'sshd is stopped', items: ['Fix: sudo systemctl start sshd'], issue: 'SSH down',
         });
-    return {rows, link: null};
+    return {rows, link: null, linkLabel: null};
+}
+
+function geminiWorkers(w, pending = new Set()) {
+    const rows = [];
+    const srv = w.daemon && typeof w.daemon === 'object' ? w.daemon : {};
+    const state = srv.state ? `${srv.state}` : null;
+    const inst = srv.instance_name ? clip(srv.instance_name, 48) : null;
+    const history = serverHistory(srv, pending.has('gemini.drops'), 'gemini.drops');
+    const daemon = {icon: 'network-server-symbolic', name: 'Phone & web daemon', history};
+    if (!srv.service_active) {
+        rows.push({
+            ...daemon, level: 'bad', detail: 'Remote Control daemon not running', issue: 'Daemon down',
+            // Its own scope so the registered service starts cleanly outside GNOME Shell's cgroup.
+            action: {
+                id: 'gemini-start', label: 'Start daemon',
+                argv: ['systemd-run', '--user', '--scope', '--quiet', '--collect', '--', AGY_BIN, 'remote-control', 'start'],
+                done: 'Remote daemon started',
+            },
+        });
+    } else if (!state || state === 'Connected' || state === 'Ready') {
+        const unstable = (history?.count ?? 0) >= 10;
+        rows.push({
+            ...daemon, level: unstable ? 'warn' : 'ok', chip: unstable ? 'Unstable' : undefined,
+            detail: [state ?? 'Connected', inst].filter(Boolean).join(' · '),
+            issue: unstable ? `Daemon dropped ${history.count}× today` : undefined,
+        });
+    } else {
+        const bad = state === 'Error' || state === 'Disconnected';
+        rows.push({
+            ...daemon, level: bad ? 'bad' : 'warn',
+            detail: [`${state}${bad ? '' : '…'}`, inst].filter(Boolean).join(' · '),
+            issue: state === 'Error' ? 'Daemon error'
+                : state === 'Disconnected' ? 'Daemon offline' : `${state ?? 'Starting'}…`,
+            action: {
+                id: 'gemini-restart', label: bad ? 'Restart daemon' : 'Restart anyway',
+                argv: ['systemctl', '--user', 'restart', GEMINI_UNIT],
+                confirm: 'Ends remote daemon sessions · click again',
+                done: 'Remote daemon restarted',
+            },
+        });
+    }
+
+    const ses = w.sessions && typeof w.sessions === 'object' ? w.sessions : {};
+    const total = num(ses.total) || 0;
+    const connected = num(ses.connected) || 0;
+    const term = {icon: 'utilities-terminal-symbolic', name: 'Terminal sessions'};
+    if (!total) {
+        rows.push({...term, level: 'idle', chip: 'None', detail: 'No interactive sessions open'});
+    } else if (connected >= total) {
+        rows.push({...term, level: 'ok', detail: total === 1 ? 'On Remote Control' : `All ${total} on Remote Control`});
+    } else if (connected > 0) {
+        rows.push({
+            ...term, level: 'ok', chip: `${connected} of ${total}`,
+            detail: `${connected} of ${total} shared · /remote-control`,
+        });
+    } else {
+        rows.push({
+            ...term, level: 'idle', chip: 'Local',
+            detail: `${total} open · /remote-control to share`,
+        });
+    }
+
+    const link = srv.service_active ? safeLink(srv.link, 'antigravity.google.com') : null;
+    return {rows, link, linkLabel: 'Open dashboard in browser'};
 }
 
 function buildModel(key, d, pending = new Set()) {
     const account = accountModel(key, d.account);
     if (!d.account && pending.has(`${key}.account`))
         Object.assign(account, {loggedIn: true, title: 'Loading account…', plan: null, meta: ''});
+    if (account.loggedIn && !account.plan) {
+        const uPlan = d.usage?.plan ?? d.usage?.stale?.plan;
+        if (uPlan)
+            account.plan = planName(uPlan);
+    }
     const usage = usageModel(d.usage);
     const tokens = tokensModel(key, d.tokens);
     const w = d.workers && typeof d.workers === 'object' ? d.workers : null;
+    const workersFor = key === 'claude' ? claudeWorkers : key === 'codex' ? codexWorkers : geminiWorkers;
     const remote = w
-        ? {...(key === 'claude' ? claudeWorkers(w, pending) : codexWorkers(w, pending)), unavailable: false}
-        : {rows: [], link: null, unavailable: true};
+        ? {...workersFor(w, pending), unavailable: false}
+        : {rows: [], link: null, linkLabel: null, unavailable: true};
 
     // Usage-side issue (only the most important one makes it into the summary line).
     let usageIssue = null;
@@ -1073,7 +1173,7 @@ const AgentUsageIndicator = GObject.registerClass({
         this._pages = {}; // tab key -> {box, missing, sections: {name -> {key, actor, live, rings}}}
         this._stateBox = null; // skeleton / fatal error (no data yet)
         this._skeleton = null;
-        this._prevPct = {claude: new Map(), codex: new Map()};
+        this._prevPct = Object.fromEntries(TABS.map(t => [t.key, new Map()]));
         this._pending = new Set(); // parts of the shown snapshot that are still loading
         this._freshened = new Set(); // parts that just arrived (fade in)
         this._runFrames = 0; // frames received in the current collector run
@@ -1159,7 +1259,7 @@ const AgentUsageIndicator = GObject.registerClass({
             if (this._snapCancel === cancellable)
                 this._snapCancel = null;
             if (this._destroyed || this._data || this._proc || !data || typeof data !== 'object' ||
-                (!data.claude && !data.codex))
+                !TABS.some(t => data[t.key]))
                 return;
             this._fromDisk = true;
             try {
@@ -1468,7 +1568,7 @@ const AgentUsageIndicator = GObject.registerClass({
             } catch {
                 data = null;
             }
-            if (data && typeof data === 'object' && (data.claude || data.codex)) {
+            if (data && typeof data === 'object' && TABS.some(t => data[t.key])) {
                 const pending = Array.isArray(data.pending) ? data.pending.map(p => `${p}`) : [];
                 try {
                     this._fromDisk = false;
@@ -1664,7 +1764,7 @@ const AgentUsageIndicator = GObject.registerClass({
         case 'tokens':
             return JSON.stringify([m.tokens, loading(['codex.tokens'])]);
         default:
-            return JSON.stringify([m.remote, loading(['codex.relay', 'claude.drops', 'codex.events']),
+            return JSON.stringify([m.remote, loading(['codex.relay', 'claude.drops', 'codex.events', 'gemini.drops']),
                 this._actionBusy, this._actionErr]);
         }
     }
@@ -1920,12 +2020,15 @@ const AgentUsageIndicator = GObject.registerClass({
         if (loading && u.missing) {
             this._skeletonGauges(card);
         } else if (u.off) {
-            card.add_child(this._notice('dialog-information-symbolic', 'Live limits are off',
-                'They need your Claude Code login, which Anthropic reserves for its own apps. To turn ' +
-                'them on anyway, add "claude_live_limits": true to ~/.config/ai-tracker/config.json.', 'idle'));
+            const offNote = tab.key === 'gemini'
+                ? 'Live quota checks are turned off in ~/.config/ai-tracker/config.json ("gemini_live_limits": false).'
+                : 'They need your Claude Code login, which Anthropic reserves for its own apps. To turn ' +
+                  'them on anyway, add "claude_live_limits": true to ~/.config/ai-tracker/config.json.';
+            card.add_child(this._notice('dialog-information-symbolic', 'Live limits are off', offNote, 'idle'));
         } else if (!m.account.loggedIn && (u.error || !u.windows.length)) {
+            const genericOut = tab.key === 'claude' ? 'Not signed in to Claude Code' : 'Not signed in to Gemini (Antigravity)';
             card.add_child(this._notice('system-lock-screen-symbolic', 'Signed out',
-                u.error && u.error !== 'Not signed in to Claude Code' ? u.error : m.account.meta, 'bad'));
+                u.error && u.error !== genericOut ? u.error : m.account.meta, 'bad'));
         } else if (u.error) {
             card.add_child(this._notice('dialog-warning-symbolic', 'Limits unavailable', u.error, 'warn'));
         } else if (!u.windows.length) {
@@ -2116,7 +2219,7 @@ const AgentUsageIndicator = GObject.registerClass({
         if (r.link) {
             const inner = add(hbox('au-link-inner', {x_align: ALIGN.CENTER}),
                 new St.Icon({icon_name: 'send-to-symbolic', style_class: 'au-link-icon'}),
-                label('Open environment in browser', 'au-link-label'));
+                label(r.linkLabel ?? 'Open environment in browser', 'au-link-label'));
             const open = new St.Button({child: inner, style_class: 'au-link', can_focus: true, x_expand: true});
             open.connect('clicked', () => this._openUri(r.link));
             card.add_child(add(hbox('au-link-row', {x_expand: true}), open, this._copyButton(r.link)));

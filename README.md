@@ -1,6 +1,6 @@
 # ai-tracker-fedora-linux
 
-A GNOME top-bar widget for Claude Code and Codex. It shows:
+A GNOME top-bar widget for Claude Code, Codex and Gemini (Google Antigravity CLI). It shows:
 
 - plan limits;
 - token usage;
@@ -13,7 +13,7 @@ It fetches only when you open it, never in the background.
   <img src="docs/demo.gif" width="408" alt="Demo: open the widget, saved numbers update live, switch to Codex, refresh into a problem, one click on Fix now, healthy again">
 </p>
 
-> Unofficial: not affiliated with Anthropic or OpenAI. Live Claude limits are
+> Unofficial: not affiliated with Anthropic, OpenAI or Google. Live Claude limits are
 > [off by default](#live-claude-limits-optional).
 
 ## Features
@@ -21,12 +21,12 @@ It fetches only when you open it, never in the background.
 - **Plan limits**: a ring per limit window with a reset countdown and a pace marker. When you are using
   it up too fast, it also projects when it will run out ("full in ~19m").
 - **Tokens**:
-  - Claude: today, on this computer;
+  - Claude & Gemini: today, on this computer;
   - Codex: today, the last 7 days and lifetime.
-- **Remote access**: health of the Claude Remote Control server and the Codex background service, with
-  today's up-time and drops on a timeline.
-- **One-click fixes**: start or restart a service, or replace a stray Codex server. Anything that would end
-  running sessions asks twice.
+- **Remote access**: health of the Claude Remote Control server, the Codex background service and the
+  Antigravity Remote Control daemon, with today's up-time and drops on a timeline.
+- **One-click fixes**: start or restart a service or daemon, or replace a stray Codex server. Anything
+  that would end running sessions asks twice.
 - **Fast**: opens instantly with the last numbers, then streams in fresh ones. The first frame takes under
   10 ms, and the live parts arrive within about half a second.
 - **Quit and open like an app**: the power button in the menu takes it off the top bar, and it stays
@@ -39,7 +39,7 @@ You need:
 
 - GNOME Shell 50 or 51 on Wayland (tested on Fedora 44 and 45);
 - Rust;
-- Claude Code (`claude`) and/or Codex (`codex`) in `~/.local/bin`, logged in.
+- Claude Code (`claude`), Codex (`codex`) and/or Antigravity (`agy`) in `~/.local/bin`, logged in.
 
 ```sh
 git clone https://github.com/danielmapar/ai-tracker-fedora-linux.git
@@ -67,12 +67,14 @@ echo '{"claude_live_limits": true}' > ~/.config/ai-tracker/config.json
 
 ## Remote access from your phone
 
-[docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) explains how to run Claude Code and Codex on Linux so you
-can start and continue sessions from your phone or the web. It also covers keeping them up through
-crashes and reboots. `./install.sh --workers` installs the services it describes, without switching
-them on.
+[docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) explains how to run Claude Code, Codex and Gemini
+(Antigravity CLI) on Linux so you can start and continue sessions from your phone or the web. It also
+covers keeping them up through crashes and reboots. `./install.sh --workers` installs the Claude and
+Codex systemd units it describes, without switching them on (`agy remote-control start` registers
+Antigravity's own unit).
 
-> While they run, anyone signed in to your Claude or ChatGPT account can start work on this computer.
+> While they run, anyone signed in to your Claude, ChatGPT or Google account can start work on this
+> computer.
 
 ## How it works
 

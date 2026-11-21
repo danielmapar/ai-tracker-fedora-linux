@@ -1,12 +1,13 @@
-/* Agent Usage: redesigned menu for GNOME Shell 50 (dark shell theme).
- * Every class is prefixed au-. Accent per tab comes from .au-claude / .au-codex on each tab page
- * (and on the progress bar and footer for the active tab);
+/* Agent Usage: redesigned menu for GNOME Shell 50/51 (dark shell theme).
+ * Every class is prefixed au-. Accent per tab comes from .au-claude / .au-codex / .au-gemini on each
+ * tab page (and on the progress bar and footer for the active tab);
  * status colours from .au-level-ok / -warn / -bad / -idle. Ring and bar colours are custom
  * properties read by the cairo code in ui.js (-au-ring-*).
  *
  * Palette
  *   ok    #57d98a   warn  #f6c453   bad  #ff6b6b   idle  white 40%
  *   Claude coral   #ffc09f → #e0663c      Codex teal → indigo   #44e3c9 → #6a6ff5
+ *   Gemini sky → violet   #7ab8ff → #b37aff
  */
 
 /* ---------- panel button ---------- */
@@ -45,7 +46,7 @@
 }
 
 .au-tab {
-  padding: 7px 10px;
+  padding: 7px 8px;
   border-radius: 10px;
   color: rgba(255, 255, 255, 0.66);
   font-weight: 700;
@@ -60,14 +61,20 @@
 }
 .au-tab-claude:checked { background-gradient-start: #ee9067; background-gradient-end: #cf5f3b; }
 .au-tab-codex:checked { background-gradient-start: #1fae9f; background-gradient-end: #545ee0; }
+.au-tab-gemini:checked { background-gradient-start: #4b8bf5; background-gradient-end: #8e5cf6; }
 
-.au-tab-inner { spacing: 8px; }
+.au-tab-inner { spacing: 6px; }
 .au-tab-icon { icon-size: 1.1em; }
 .au-tab-label { font-weight: 700; }
 .au-tab-dot {
   width: 7px;
   height: 7px;
   border-radius: 999px;
+}
+.au-tab:checked .au-tab-dot {
+  width: 6px;
+  height: 6px;
+  border: 1.5px solid rgba(0, 0, 0, 0.45);
 }
 .au-tab-dot.au-level-warn { background-color: #f6c453; }
 .au-tab-dot.au-level-bad { background-color: #ff6b6b; }
@@ -79,6 +86,7 @@
 }
 .au-progress.au-claude { -au-progress-color: #ff9d78; }
 .au-progress.au-codex { -au-progress-color: #4fe0cc; }
+.au-progress.au-gemini { -au-progress-color: #8cbeff; }
 
 /* ---------- content ---------- */
 
@@ -118,6 +126,7 @@
 }
 .au-claude .au-avatar { background-gradient-start: #f6a580; background-gradient-end: #cf5f3b; }
 .au-codex .au-avatar { background-gradient-start: #2cc9b5; background-gradient-end: #5560e2; }
+.au-gemini .au-avatar { background-gradient-start: #5ea0ff; background-gradient-end: #8a5cf5; }
 .au-root .au-avatar.au-avatar-off {
   background-gradient-direction: none;
   background-color: rgba(255, 255, 255, 0.1);
@@ -135,6 +144,7 @@
 }
 .au-claude .au-plan { color: #ffc6ad; background-color: rgba(232, 132, 95, 0.22); }
 .au-codex .au-plan { color: #a6f0e6; background-color: rgba(47, 200, 181, 0.2); }
+.au-gemini .au-plan { color: #d6e6ff; background-color: rgba(94, 160, 255, 0.22); }
 .au-account-sub { font-size: 0.8em; color: rgba(255, 255, 255, 0.55); }
 
 /* buttons */
@@ -153,6 +163,7 @@
 .au-button-accent { background-gradient-direction: horizontal; }
 .au-claude .au-button-accent { background-gradient-start: #ee9067; background-gradient-end: #cf5f3b; }
 .au-codex .au-button-accent { background-gradient-start: #1fae9f; background-gradient-end: #545ee0; }
+.au-gemini .au-button-accent { background-gradient-start: #4b8bf5; background-gradient-end: #8e5cf6; }
 
 /* sections and cards */
 .au-section { spacing: 7px; }
@@ -184,6 +195,8 @@
 .au-claude .au-bar { -au-ring-from: #ffc09f; -au-ring-to: #e0663c; }
 .au-codex .au-ring,
 .au-codex .au-bar { -au-ring-from: #44e3c9; -au-ring-to: #6a6ff5; }
+.au-gemini .au-ring,
+.au-gemini .au-bar { -au-ring-from: #7ab8ff; -au-ring-to: #b37aff; }
 .au-root .au-ring.au-level-warn,
 .au-root .au-bar.au-level-warn { -au-ring-from: #ffe49a; -au-ring-to: #f39c26; }
 .au-root .au-ring.au-level-bad,
@@ -256,6 +269,7 @@
 .au-tile-value { font-size: 1.3em; font-weight: 800; font-feature-settings: "tnum"; }
 .au-claude .au-tile-value { color: #ffe0d2; }
 .au-codex .au-tile-value { color: #d4f7f2; }
+.au-gemini .au-tile-value { color: #dce8ff; }
 .au-tile-caption { font-size: 0.75em; color: rgba(255, 255, 255, 0.5); }
 
 /* ---------- remote access ---------- */
@@ -313,6 +327,7 @@
 .au-footer-status.au-footer-busy { color: rgba(255, 255, 255, 0.78); }
 .au-claude .au-footer-status.au-footer-busy { color: #ffb699; }
 .au-codex .au-footer-status.au-footer-busy { color: #7fe6d6; }
+.au-gemini .au-footer-status.au-footer-busy { color: #a8cbff; }
 .au-footer-status.au-footer-warn { color: #f6c453; }
 
 .au-refresh {
@@ -373,6 +388,7 @@
 .au-section-aside.au-section-busy { font-style: italic; }
 .au-claude .au-section-busy { color: #ffb699; }
 .au-codex .au-section-busy { color: #7fe6d6; }
+.au-gemini .au-section-busy { color: #a8cbff; }
 
 /* today's timeline of a worker: midnight → now, up-time in the tab accent, a dot per incident */
 .au-history { spacing: 3px; padding-top: 5px; }
@@ -386,6 +402,7 @@
 }
 .au-claude .au-timeline { -au-ring-from: #ffc09f; -au-ring-to: #e0663c; }
 .au-codex .au-timeline { -au-ring-from: #44e3c9; -au-ring-to: #6a6ff5; }
+.au-gemini .au-timeline { -au-ring-from: #7ab8ff; -au-ring-to: #b37aff; }
 .au-timeline-axis { padding: 0 1px; }
 .au-timeline-tick { font-size: 0.62em; color: rgba(255, 255, 255, 0.3); font-feature-settings: "tnum"; }
 
@@ -403,6 +420,8 @@
 .au-claude .au-row-action:hover { background-color: rgba(232, 132, 95, 0.45); }
 .au-codex .au-row-action { background-color: rgba(47, 200, 181, 0.28); }
 .au-codex .au-row-action:hover { background-color: rgba(47, 200, 181, 0.42); }
+.au-gemini .au-row-action { background-color: rgba(102, 142, 248, 0.28); }
+.au-gemini .au-row-action:hover { background-color: rgba(102, 142, 248, 0.43); }
 .au-root .au-row-action.au-row-action-armed { color: #ffe1a0; background-color: rgba(246, 196, 83, 0.26); }
 .au-root .au-button.au-button-armed { color: #ffe1a0; background-color: rgba(246, 196, 83, 0.26); }
 .au-account-warning { font-size: 0.8em; color: #f6c453; padding: 7px 4px 0 4px; }

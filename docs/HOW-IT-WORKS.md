@@ -10,14 +10,14 @@
 
 - **Health line.** For example "Remote access healthy" or "5-hour at 92% · 3 remote issues".
 - **Account and plan.** A Max 20x login shows as Ultra, the plan's name since 30 October 2026; the
-  login files still say `max`.
-  - Signed out: **Log in…** opens a terminal with `claude auth login` or `codex login`.
+  login files still say `max`. Google AI Ultra / Pro and Gemini Enterprise tiers come from Code Assist.
+  - Signed out: **Log in…** opens a terminal with `claude auth login`, `codex login` or `agy`.
   - Signed in: **Switch…** asks once, since signing out ends that tool's sessions on this computer.
-    Then it opens a terminal that signs out (`claude auth logout` / `codex logout`) and signs in again,
-    so the browser can offer another account. A plain `login` would just approve the account the
-    browser is already signed in to.
-  - The widget never handles a login itself: it only reads what Claude Code and Codex saved, and
-    the official tools do the signing in.
+    Then it opens a terminal that signs out (`claude auth logout`, `codex logout` or clearing the
+    Antigravity keyring token) and signs in again, so the browser can offer another account. A plain
+    `login` would just approve the account the browser is already signed in to.
+  - The widget never handles a login itself: it only reads what Claude Code, Codex and Antigravity
+    saved, and the official tools do the signing in.
 - **Plan limits.** A ring per limit window shows:
   - the percentage used;
   - a reset countdown;
@@ -25,14 +25,15 @@
   - a projection such as "full in ~19m" when you are using it up faster than the window resets.
 
   Claude shows every window the account has, including model-scoped weekly limits such as Ultra's
-  separate Fable limit.
+  separate Fable limit. Gemini groups Antigravity's model quota buckets (such as Gemini and Claude &
+  GPT) and shows AI Premium credits when present.
 - **Tokens.**
-  - Claude: today's tokens on this computer, counted from local transcripts.
+  - Claude & Gemini: today's tokens on this computer, counted incrementally from local transcripts.
   - Codex: today, the last 7 days and lifetime, for the whole account.
 - **Remote access.** A status chip per service, plus a midnight-to-now timeline with up-time and a dot
   for each drop or watchdog restart.
 - **Fix buttons.** They appear only when something is wrong:
-  - start or restart a service;
+  - start or restart a service or daemon;
   - replace a stray Codex server;
   - turn the watchdog back on.
 
@@ -118,31 +119,40 @@ The widget is a GNOME Shell extension, and GNOME runs at most one copy of an ext
 | Codex account, limits, tokens, relay | the Codex background service's control socket, `~/.codex/app-server-control/app-server-control.sock` (JSON-RPC `account/read`, `account/rateLimits/read`, `account/usage/read`, `remoteControl/status/read`) |
 | Codex watchdog | `codex-remote-control.service` / `.timer`, its journal, and its note of which other Codex app holds the phone link (`$XDG_RUNTIME_DIR/codex-remote-control-watchdog.held`) |
 | SSH (for the Codex desktop app) | `sshd.service` |
+| Gemini account, plan, limits, credits | Antigravity login in the session keyring (`secret-tool lookup service gemini username antigravity`, or `~/.gemini/antigravity-cli/settings.json` API-key mode) + Code Assist `loadCodeAssist` and `retrieveUserQuota` (same endpoints `agy`'s `/usage` calls; can be turned off with `"gemini_live_limits": false` in `~/.config/ai-tracker/config.json`) |
+| Gemini tokens today | transcripts under `~/.gemini/antigravity-cli/brain/**/.system_generated/logs/transcript.jsonl`, scanned incrementally |
+| Gemini remote daemon & sessions | `antigravity-cli-daemon.service` and its journal (`agy remote-control`), plus running interactive `agy` terminal sessions in `/proc` |
 
 ## Privacy and safety
 
 - **Read-only.** The collector itself never refreshes or rewrites a login token and never starts, stops
-  or changes a service. There are two fallbacks:
+  or changes a service. Its external reads are:
   - for unusual Claude login setups it asks `claude auth status`;
+  - for Gemini (Antigravity) it reads the session keyring via `secret-tool lookup`;
   - when the Codex background service is not running, it asks a private, short-lived
     `codex app-server` and stops it right after.
-- **Claude token.** With live limits off (the default), the collector never keeps the token: it only
-  checks that a login exists. With them on, the token goes only in the `Authorization` header of the
-  one request to `api.anthropic.com`, over TLS, and is never written anywhere. The process is not
-  dumpable either, so it leaves no core dumps and other processes can't read its memory.
-- **Network.** That one request is the only network call. Everything Codex-related goes through your
-  local Codex service.
+- **Claude & Gemini tokens.** With live Claude limits off (the default), the collector never keeps the
+  Claude token: it only checks that a login exists. With live limits on (opt-in for Claude; on by
+  default for Gemini unless `"gemini_live_limits": false`), each access token goes only in the
+  `Authorization` header over TLS (`api.anthropic.com` for Claude; `daily-cloudcode-pa.googleapis.com`
+  for Gemini), refresh tokens are dropped immediately after parsing, and no token is ever written
+  anywhere. The process is not dumpable either, so it leaves no core dumps and other processes can't
+  read its memory.
+- **Network.** Those TLS quota requests are the only network calls (`--offline` skips them). Everything
+  Codex-related goes through your local Codex service.
 - **Files written.** Only in `~/.cache/agent-usage/`, with the folder at mode 0700 and the files at
   0600:
   - `last-snapshot.json`: the last output, including your account emails and session titles;
-  - `claude-tokens-v1.bin`: transcript token counts;
-  - `claude-usage-last.json`, `codex-usage-last.json`, `codex-tokens-last.json`: the last good limits
-    and token totals, shown with their time when a live call fails (for example a slow OpenAI
-    response or a stopped service);
-  - `claude-drops-v2.json` and `codex-events-v1.json`: journal cursors and today's events.
+  - `claude-tokens-v1.bin`, `gemini-tokens-v1.bin`: transcript token counts;
+  - `claude-usage-last.json`, `codex-usage-last.json`, `codex-tokens-last.json`, `gemini-usage-last.json`:
+    the last good limits and token totals, shown with their time when a live call fails (for example a
+    slow backend response or a stopped service);
+  - `claude-drops-v2.json`, `codex-events-v1.json`, `gemini-drops-v1.json`: journal cursors and today's
+    events.
 - **Commands.** The widget runs only fixed commands: the collector, `systemctl --user …`,
-  `systemd-run --user --scope … codex app-server daemon restart`, and a terminal for login. No value
-  from the data ever reaches a command line, and it opens only `https://claude.ai/…` links.
+  `systemd-run --user --scope …` (`codex app-server daemon restart` / `agy remote-control start`), and
+  a terminal for login. No value from the data ever reaches a command line, and it opens only
+  `https://claude.ai/…` and `https://antigravity.google.com/…` links.
 
 ## Testing
 

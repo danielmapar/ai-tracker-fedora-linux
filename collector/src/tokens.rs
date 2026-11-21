@@ -1,13 +1,14 @@
-//! "Tokens today" from Claude Code's local transcripts (`~/.claude/projects/**/*.jsonl`), computed
+//! "Tokens today" from local transcripts of Claude Code (`~/.claude/projects/**/*.jsonl`) and
+//! Gemini / Antigravity CLI (`~/.gemini/antigravity-cli/brain/**/transcript.jsonl`), computed
 //! incrementally.
 //!
-//! Semantics are exactly those of the original full scan:
-//! - files: the same depth-first walk (same `read_dir` order, depth 4), only `*.jsonl` whose mtime is
-//!   at or after local midnight;
-//! - lines: read like `BufRead::lines()`, i.e. a file stops at its first line that is not UTF-8;
-//! - entries: `type == "assistant"`, `timestamp >= midnight`, `message.usage` present;
-//! - dedupe: key `message.id + "|" + requestId` (the key `"|"` is never deduped), the first
-//!   occurrence in walk order (file order, then line order) wins.
+//! Semantics match a full depth-first scan (depth 4, regular files with `mtime >= midnight`,
+//! UTF-8 lines stopping at any non-UTF-8 line, first occurrence in walk + line order wins):
+//! - Claude: `*.jsonl`, `type == "assistant"`, `timestamp >= midnight`, `message.usage` present,
+//!   dedupe key `message.id + "|" + requestId` (`"|"` is never deduped).
+//! - Gemini: exact file name `"transcript.jsonl"` (never `"transcript_full.jsonl"`),
+//!   `type == "PLANNER_RESPONSE"`, `created_at >= midnight`, at least one token field present,
+//!   dedupe key `(file_path, step_index)` (`step_index: None` is never deduped).
 //!
 //! What makes it fast: a small binary cache in `~/.cache/agent-usage/` remembers, per file, how far it
 //! was read (always just after a newline), a fingerprint of the bytes before that point, and the
@@ -34,8 +35,6 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use memchr::memmem;
 
-const MAGIC: &[u8; 16] = b"AU-CLAUDE-TOK-1\n";
-const CACHE_FILE: &str = "claude-tokens-v1.bin";
 /// Read big regions in chunks of this size (aligned to line ends), in parallel.
 const CHUNK: u64 = 1 << 20;
 const MAX_THREADS: usize = 8;
@@ -43,10 +42,43 @@ const MAX_THREADS: usize = 8;
 const FP: u64 = 64;
 const NONE_TS: i64 = i64::MIN;
 
+struct Spec {
+    label: &'static str,
+    rel_root: &'static str,
+    cache_file: &'static str,
+    magic: &'static [u8; 16],
+    match_file: fn(&Path) -> bool,
+    finder_a: &'static [u8],
+    finder_b: Option<&'static [u8]>,
+    scan_line: fn(&[u8], &[u8], u64, i64, &Finders, &mut Vec<Hit>, &mut i64),
+}
+
+const CLAUDE_SPEC: Spec = Spec {
+    label: "claude tokens",
+    rel_root: ".claude/projects",
+    cache_file: "claude-tokens-v1.bin",
+    magic: b"AU-CLAUDE-TOK-1\n",
+    match_file: |p| p.extension().is_some_and(|x| x == "jsonl"),
+    finder_a: b"\"usage\"",
+    finder_b: Some(b"\"assistant\""),
+    scan_line: scan_claude_line,
+};
+
+const GEMINI_SPEC: Spec = Spec {
+    label: "gemini tokens",
+    rel_root: ".gemini/antigravity-cli/brain",
+    cache_file: "gemini-tokens-v1.bin",
+    magic: b"AU-GEMINI-TOK-1\n",
+    match_file: |p| p.file_name().is_some_and(|x| x == "transcript.jsonl"),
+    finder_a: b"\"PLANNER_RESPONSE\"",
+    finder_b: None,
+    scan_line: scan_gemini_line,
+};
+
 // ---------- transcript entries (only the fields we need; serde skips the rest) ----------
 
 #[derive(Deserialize)]
-struct Entry<'a> {
+struct ClaudeEntry<'a> {
     #[serde(rename = "type", borrow)]
     kind: Option<Cow<'a, str>>,
     #[serde(borrow)]
@@ -54,20 +86,33 @@ struct Entry<'a> {
     #[serde(rename = "requestId", borrow)]
     request_id: Option<Cow<'a, str>>,
     #[serde(borrow)]
-    message: Option<Msg<'a>>,
+    message: Option<ClaudeMsg<'a>>,
 }
 #[derive(Deserialize)]
-struct Msg<'a> {
+struct ClaudeMsg<'a> {
     #[serde(borrow)]
     id: Option<Cow<'a, str>>,
-    usage: Option<Usage>,
+    usage: Option<ClaudeUsage>,
 }
 #[derive(Deserialize)]
-struct Usage {
+struct ClaudeUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GeminiEntry<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    created_at: Option<Cow<'a, str>>,
+    step_index: Option<u64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
 }
 
 /// [uncached input, output, cache write, cache read]
@@ -84,7 +129,7 @@ fn sub(a: &mut Tok, b: &Tok) {
     }
 }
 
-/// One counted entry: byte offset of its line, dedupe key hash (None = key "|", never deduped), usage.
+/// One counted entry: byte offset of its line, dedupe key hash (None = never deduped), usage.
 struct Hit {
     off: u64,
     key: Option<u64>,
@@ -106,9 +151,14 @@ fn mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
 }
-/// Hash of the original's key string `format!("{id}|{rid}")`.
-fn key_hash(id: &str, rid: &str) -> u64 {
+/// Hash of the original Claude key string `format!("{id}|{rid}")`.
+fn claude_key_hash(id: &str, rid: &str) -> u64 {
     mix(fnv(fnv(fnv(FNV0, id.as_bytes()), b"|"), rid.as_bytes()))
+}
+/// Hash of `(file_path_bytes, step_index)`: NUL cannot appear in a Unix path, so keys from
+/// different conversation files never collide while duplicate `step_index` lines in one file do.
+fn gemini_key_hash(file_path: &[u8], idx: u64) -> u64 {
+    mix(fnv(fnv(fnv(FNV0, file_path), &[0]), &idx.to_le_bytes()))
 }
 
 // ---------- the cache ----------
@@ -160,9 +210,9 @@ impl Cache {
         Cache { root: root.to_vec(), midnight, files: Vec::new(), nokey: [0; 4], winners: HashMap::new() }
     }
 
-    fn encode(&self) -> Vec<u8> {
+    fn encode(&self, magic: &[u8; 16]) -> Vec<u8> {
         let mut b = Vec::with_capacity(64 + self.files.len() * 120 + self.winners.len() * 52);
-        b.extend_from_slice(MAGIC);
+        b.extend_from_slice(magic);
         put_bytes(&mut b, &self.root);
         put(&mut b, self.midnight as u64);
         put32(&mut b, self.files.len() as u32);
@@ -190,15 +240,15 @@ impl Cache {
         b
     }
 
-    fn decode(b: &[u8]) -> Option<Cache> {
-        if b.len() < MAGIC.len() + 8 || &b[..MAGIC.len()] != MAGIC {
+    fn decode(b: &[u8], magic: &[u8; 16]) -> Option<Cache> {
+        if b.len() < magic.len() + 8 || &b[..magic.len()] != magic {
             return None;
         }
         let (body, sum) = b.split_at(b.len() - 8);
         if fnv(FNV0, body) != u64::from_le_bytes(sum.try_into().ok()?) {
             return None;
         }
-        let mut r = Rd { b: body, p: MAGIC.len() };
+        let mut r = Rd { b: body, p: magic.len() };
         let root = r.bytes()?.to_vec();
         let midnight = r.u64()? as i64;
         let nf = r.u32()? as usize;
@@ -276,19 +326,20 @@ pub(crate) fn cache_dir(h: &Path) -> Option<PathBuf> {
     }
 }
 
-fn load(dir: &Path) -> Option<Cache> {
+fn load(dir: &Path, spec: &Spec) -> Option<Cache> {
     let mut b = Vec::new();
-    File::open(dir.join(CACHE_FILE)).ok()?.read_to_end(&mut b).ok()?;
-    Cache::decode(&b)
+    File::open(dir.join(spec.cache_file)).ok()?.read_to_end(&mut b).ok()?;
+    Cache::decode(&b, spec.magic)
 }
 
-fn save(dir: &Path, c: &Cache) {
+fn save(dir: &Path, spec: &Spec, c: &Cache) {
     if !crate::private_dir(dir) {
         return;
     }
-    let tmp = dir.join(format!(".{CACHE_FILE}.{}", std::process::id()));
-    let ok = crate::create_temp(&tmp).and_then(|mut f| f.write_all(&c.encode())).is_ok();
-    if !ok || fs::rename(&tmp, dir.join(CACHE_FILE)).is_err() {
+    let cache_file = spec.cache_file;
+    let tmp = dir.join(format!(".{cache_file}.{}", std::process::id()));
+    let ok = crate::create_temp(&tmp).and_then(|mut f| f.write_all(&c.encode(spec.magic))).is_ok();
+    if !ok || fs::rename(&tmp, dir.join(cache_file)).is_err() {
         let _ = fs::remove_file(&tmp);
     }
 }
@@ -302,18 +353,18 @@ struct Found {
     included: bool,
 }
 
-/// The original walk: same recursion, same order, `DirEntry::metadata` (does not follow symlinks).
-/// Only regular `.jsonl` files count: symlinks, FIFOs and devices with that name are skipped.
-fn walk(dir: &Path, since: i64, depth: u32, out: &mut Vec<Found>) {
+/// Depth-first walk using `DirEntry::metadata` (does not follow symlinks).
+/// Only regular files matching `match_file` count: symlinks, FIFOs and devices are skipped.
+fn walk(dir: &Path, since: i64, depth: u32, match_file: fn(&Path) -> bool, out: &mut Vec<Found>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         let Ok(md) = e.metadata() else { continue };
         if md.is_dir() {
             if depth > 0 {
-                walk(&p, since, depth - 1, out);
+                walk(&p, since, depth - 1, match_file, out);
             }
-        } else if md.is_file() && p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+        } else if md.is_file() && match_file(&p) {
             let mtime = md
                 .modified()
                 .ok()
@@ -355,7 +406,7 @@ struct JobOut {
     max_ts: i64,
     /// Offset just after the last '\n' read.
     done: u64,
-    /// A complete line that is not UTF-8 starts here: the original stops reading the file there.
+    /// A complete line that is not UTF-8 starts here: stop reading the file there.
     stop: Option<u64>,
     /// Entries in an unterminated last line (counted this run, not persisted).
     tail: Vec<Hit>,
@@ -364,15 +415,23 @@ struct JobOut {
 }
 
 struct Finders {
-    usage: memmem::Finder<'static>,
-    assistant: memmem::Finder<'static>,
+    a: memmem::Finder<'static>,
+    b: Option<memmem::Finder<'static>>,
 }
 
-fn scan_line(line: &[u8], off: u64, midnight: i64, fd: &Finders, hits: &mut Vec<Hit>, max_ts: &mut i64) {
-    if fd.usage.find(line).is_none() || fd.assistant.find(line).is_none() {
+fn scan_claude_line(
+    line: &[u8],
+    _file_path: &[u8],
+    off: u64,
+    midnight: i64,
+    fd: &Finders,
+    hits: &mut Vec<Hit>,
+    max_ts: &mut i64,
+) {
+    if fd.a.find(line).is_none() || fd.b.as_ref().is_some_and(|b| b.find(line).is_none()) {
         return;
     }
-    let Ok(e) = serde_json::from_slice::<Entry>(line) else { return };
+    let Ok(e) = serde_json::from_slice::<ClaudeEntry>(line) else { return };
     if e.kind.as_deref() != Some("assistant") {
         return;
     }
@@ -387,12 +446,52 @@ fn scan_line(line: &[u8], off: u64, midnight: i64, fd: &Finders, hits: &mut Vec<
     }
     let id = m.id.as_deref().unwrap_or("");
     let rid = e.request_id.as_deref().unwrap_or("");
-    let key = if id.is_empty() && rid.is_empty() { None } else { Some(key_hash(id, rid)) };
+    let key = if id.is_empty() && rid.is_empty() { None } else { Some(claude_key_hash(id, rid)) };
     let tok = [
         u.input_tokens.unwrap_or(0),
         u.output_tokens.unwrap_or(0),
         u.cache_creation_input_tokens.unwrap_or(0),
         u.cache_read_input_tokens.unwrap_or(0),
+    ];
+    hits.push(Hit { off, key, tok });
+}
+
+fn scan_gemini_line(
+    line: &[u8],
+    file_path: &[u8],
+    off: u64,
+    midnight: i64,
+    fd: &Finders,
+    hits: &mut Vec<Hit>,
+    max_ts: &mut i64,
+) {
+    if fd.a.find(line).is_none() {
+        return;
+    }
+    let Ok(e) = serde_json::from_slice::<GeminiEntry>(line) else { return };
+    if e.kind.as_deref() != Some("PLANNER_RESPONSE") {
+        return;
+    }
+    let Some(t) = e.created_at.as_deref().and_then(crate::parse_iso) else { return };
+    if e.input_tokens.is_none()
+        && e.output_tokens.is_none()
+        && e.cache_creation_tokens.is_none()
+        && e.cache_read_tokens.is_none()
+    {
+        return;
+    }
+    if t > *max_ts {
+        *max_ts = t;
+    }
+    if t < midnight {
+        return;
+    }
+    let key = e.step_index.map(|idx| gemini_key_hash(file_path, idx));
+    let tok = [
+        e.input_tokens.unwrap_or(0),
+        e.output_tokens.unwrap_or(0),
+        e.cache_creation_tokens.unwrap_or(0),
+        e.cache_read_tokens.unwrap_or(0),
     ];
     hits.push(Hit { off, key, tok });
 }
@@ -456,7 +555,15 @@ fn read_region(f: &File, start: u64, end: Option<u64>, hint: u64) -> std::io::Re
     }
 }
 
-fn scan_job(f: &File, job: &Job, hint: u64, midnight: i64, fd: &Finders) -> JobOut {
+fn scan_job(
+    f: &File,
+    file_path: &[u8],
+    job: &Job,
+    hint: u64,
+    midnight: i64,
+    fd: &Finders,
+    spec: &Spec,
+) -> JobOut {
     let mut out = JobOut { max_ts: NONE_TS, done: job.start, ..Default::default() };
     let buf = match read_region(f, job.start, job.end, hint) {
         Ok(b) => b,
@@ -476,16 +583,16 @@ fn scan_job(f: &File, job: &Job, hint: u64, midnight: i64, fd: &Finders) -> JobO
                     out.stop = Some(off);
                     break;
                 }
-                scan_line(line, off, midnight, fd, &mut out.hits, &mut out.max_ts);
+                (spec.scan_line)(line, file_path, off, midnight, fd, &mut out.hits, &mut out.max_ts);
                 pos += i + 1;
                 out.done = job.start + pos as u64;
             }
             None => {
-                // Unterminated last line: the original reads it as a line too.
+                // Unterminated last line: read as a line too (not persisted until terminated).
                 let line = &buf[pos..];
                 if std::str::from_utf8(line).is_ok() {
                     let mut ignored = NONE_TS;
-                    scan_line(line, off, midnight, fd, &mut out.tail, &mut ignored);
+                    (spec.scan_line)(line, file_path, off, midnight, fd, &mut out.tail, &mut ignored);
                 }
                 break;
             }
@@ -531,15 +638,24 @@ pub struct Report {
 
 /// Tokens Claude Code used on this machine today, from local session transcripts.
 pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
+    tokens_today(h, midnight, &CLAUDE_SPEC)
+}
+
+/// Tokens Gemini (Antigravity CLI) used on this machine today, from local conversation transcripts.
+pub fn gemini_tokens_today(h: &Path, midnight: i64) -> Report {
+    tokens_today(h, midnight, &GEMINI_SPEC)
+}
+
+fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
     let t0 = Instant::now();
-    let root = h.join(".claude/projects");
+    let root = h.join(spec.rel_root);
     let root_b = root.as_os_str().as_encoded_bytes().to_vec();
     let mut found = Vec::new();
-    walk(&root, midnight, 4, &mut found);
+    walk(&root, midnight, 4, spec.match_file, &mut found);
     let t_walk = t0.elapsed();
 
     let dir = cache_dir(h);
-    let loaded = dir.as_deref().and_then(load).filter(|c| c.root == root_b);
+    let loaded = dir.as_deref().and_then(|d| load(d, spec)).filter(|c| c.root == root_b);
     let warm = loaded.is_some();
     let mut c = loaded.unwrap_or_else(|| Cache::empty(&root_b, midnight));
     let mut dirty = !warm;
@@ -593,7 +709,7 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
         if fnd.included {
             todo.push((i, &fnd.md));
         } else if c.files[i].max_ts >= midnight {
-            rebuild = true; // counted today, but the original no longer reads it (mtime moved back)
+            rebuild = true; // counted today, but no longer included (mtime moved back)
         }
     }
     for (i, f) in c.files.iter().enumerate() {
@@ -605,6 +721,7 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
     // Check each included file against its cache entry; open the ones with something to read.
     struct Plan {
         idx: usize,
+        path: Vec<u8>,
         file: File,
         start: u64,
         size: u64,
@@ -626,7 +743,7 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
             continue;
         }
         let Ok(file) = open_regular(bytes_path(&fs_.path)) else {
-            // Unreadable now: the original skips it, so it must not keep counting from the cache.
+            // Unreadable now: skips it, so it must not keep counting from the cache.
             if fs_.max_ts >= midnight {
                 rebuild = true;
             }
@@ -686,7 +803,16 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
             }
             continue;
         }
-        plans.push(Plan { idx, file, start: fs_.offset, size, dev, ino, mtime_ns: mt });
+        plans.push(Plan {
+            idx,
+            path: fs_.path.clone(),
+            file,
+            start: fs_.offset,
+            size,
+            dev,
+            ino,
+            mtime_ns: mt,
+        });
     }
 
     // Read everything new, in parallel chunks.
@@ -694,7 +820,10 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
     for (pi, p) in plans.iter().enumerate() {
         split(&p.file, pi, p.start, p.size, &mut jobs);
     }
-    let fd = Finders { usage: memmem::Finder::new(b"\"usage\""), assistant: memmem::Finder::new(b"\"assistant\"") };
+    let fd = Finders {
+        a: memmem::Finder::new(spec.finder_a),
+        b: spec.finder_b.map(memmem::Finder::new),
+    };
     let mut outs: Vec<Option<JobOut>> = (0..jobs.len()).map(|_| None).collect();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(MAX_THREADS).min(jobs.len());
     let hint = |j: &Job| match j.end {
@@ -703,7 +832,8 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
     };
     if threads <= 1 {
         for (k, j) in jobs.iter().enumerate() {
-            outs[k] = Some(scan_job(&plans[j.plan].file, j, hint(j), midnight, &fd));
+            let p = &plans[j.plan];
+            outs[k] = Some(scan_job(&p.file, &p.path, j, hint(j), midnight, &fd, spec));
         }
     } else {
         let next = AtomicUsize::new(0);
@@ -712,7 +842,8 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
             loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 let Some(j) = jobs.get(k) else { break };
-                mine.push((k, scan_job(&plans[j.plan].file, j, hint(j), midnight, &fd)));
+                let p = &plans[j.plan];
+                mine.push((k, scan_job(&p.file, &p.path, j, hint(j), midnight, &fd, spec)));
             }
             mine
         };
@@ -842,13 +973,14 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
             dirty = true;
         }
         if dirty {
-            save(d, &c);
+            save(d, spec, &c);
         }
     }
 
     let [input, output, cache_w, cache_r] = total;
     let trace = format!(
-        "tokens: {} files walked ({} today), {} read ({} chunks, {} threads), {:.1} MB, cache {}{}{} | walk {:.1} ms, scan {:.1} ms, total {:.1} ms",
+        "{}: {} files walked ({} today), {} read ({} chunks, {} threads), {:.1} MB, cache {}{}{} | walk {:.1} ms, scan {:.1} ms, total {:.1} ms",
+        spec.label,
         found.len(),
         todo.len(),
         plans.len(),
@@ -877,4 +1009,73 @@ pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
 fn bytes_path(b: &[u8]) -> &Path {
     use std::os::unix::ffi::OsStrExt;
     Path::new(std::ffi::OsStr::from_bytes(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn gemini_scanner_dedupes_within_file_not_across_files_and_ignores_full_transcript() {
+        let dir = std::env::temp_dir().join(format!("au-gemini-tok-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let midnight = 1_763_596_800i64; // 2025-11-20T00:00:00Z
+        let c1 = dir.join(".gemini/antigravity-cli/brain/conv-1/.system_generated/logs");
+        let c2 = dir.join(".gemini/antigravity-cli/brain/conv-2/.system_generated/logs");
+        fs::create_dir_all(&c1).unwrap();
+        fs::create_dir_all(&c2).unwrap();
+
+        let lines1 = [
+            // Yesterday: excluded
+            json!({"step_index": 0, "type": "PLANNER_RESPONSE", "created_at": "2025-11-19T23:59:59Z", "input_tokens": 999, "output_tokens": 999}).to_string(),
+            // Mentioning "PLANNER_RESPONSE" inside a GENERIC step: ignored
+            json!({"step_index": 1, "type": "GENERIC", "created_at": "2025-11-20T01:00:00Z", "content": "\"PLANNER_RESPONSE\"", "input_tokens": 888}).to_string(),
+            // PLANNER_RESPONSE without any token fields: ignored
+            json!({"step_index": 2, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:01Z", "status": "ERROR"}).to_string(),
+            // First step_index=3 wins
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:02Z", "input_tokens": 100, "output_tokens": 40, "cache_creation_tokens": 10, "cache_read_tokens": 500}).to_string(),
+            // Duplicate step_index=3 in same file: deduped
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:03Z", "input_tokens": 999, "output_tokens": 999}).to_string(),
+            // No step_index: never deduped
+            json!({"type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:04Z", "input_tokens": 5, "output_tokens": 2}).to_string(),
+            json!({"type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:05Z", "input_tokens": 5, "output_tokens": 2}).to_string(),
+        ];
+        fs::write(c1.join("transcript.jsonl"), lines1.join("\n") + "\n").unwrap();
+        // transcript_full.jsonl MUST be ignored
+        fs::write(
+            c1.join("transcript_full.jsonl"),
+            json!({"step_index": 99, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:02Z", "input_tokens": 50000, "output_tokens": 50000}).to_string() + "\n",
+        )
+        .unwrap();
+
+        // Same step_index=3 in a different conversation file MUST NOT collide
+        fs::write(
+            c2.join("transcript.jsonl"),
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T02:00:00Z", "input_tokens": 200, "output_tokens": 60, "cache_read_tokens": 300}).to_string() + "\n",
+        )
+        .unwrap();
+
+        let r1 = gemini_tokens_today(&dir, midnight);
+        assert!(r1.trace.contains("cache cold"), "{}", r1.trace);
+        assert_eq!(r1.value["today_uncached_input"], 310);
+        assert_eq!(r1.value["today_output"], 104);
+        assert_eq!(r1.value["today_total"], 310 + 104 + 10 + 800);
+        assert!(dir.join(".cache/agent-usage/gemini-tokens-v1.bin").exists());
+
+        // Warm incremental append
+        let mut f = fs::OpenOptions::new().append(true).open(c2.join("transcript.jsonl")).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 4, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T03:00:00Z", "input_tokens": 20, "output_tokens": 6})
+        )
+        .unwrap();
+        let r2 = gemini_tokens_today(&dir, midnight);
+        assert!(r2.trace.contains("cache warm"), "{}", r2.trace);
+        assert_eq!(r2.value["today_uncached_input"], 330);
+        assert_eq!(r2.value["today_output"], 110);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

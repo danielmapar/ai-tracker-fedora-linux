@@ -85,5 +85,42 @@
       }
     }
   },
+  "gemini": {
+    "account": {
+      "auth_method": "google",
+      "email": "user@example.com",
+      "logged_in": true,
+      "plan": "ultra"
+    },
+    "tokens": {
+      "source": "local transcripts on this computer",
+      "today_output": 310000,
+      "today_total": 45200000,
+      "today_uncached_input": 1800000
+    },
+    "usage": {
+      "credits": 500,
+      "plan": "ultra",
+      "windows": [
+        {
+          "label": "5-hour · Gemini",
+          "pct": 22.0,
+          "resets_at": 1767236400
+        }
+      ]
+    },
+    "workers": {
+      "daemon": {
+        "instance_name": "devbox-swift-falcon",
+        "link": "https://antigravity.google.com",
+        "service_active": true,
+        "state": "Connected"
+      },
+      "sessions": {
+        "connected": 2,
+        "total": 2
+      }
+    }
+  },
   "generated_at": 1767225600
 }

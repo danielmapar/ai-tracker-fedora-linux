@@ -10,6 +10,7 @@ def base():
     s["claude"]["usage"]["windows"] = [{"label": "Weekly", "pct": 24.0, "resets_at": now + 3*D + 22*H}]
     s["codex"]["usage"]["windows"] = [{"label": "Weekly", "pct": 11.0, "resets_at": now + 3*D + 5*H}]
     s["codex"]["workers"]["watchdog"]["last_run"] = now - 17*60
+    s["gemini"]["usage"]["windows"] = [{"label": "5-hour · Gemini", "pct": 22.0, "resets_at": now + 3*H + 15*60}]
     return s
 
 sc = {}
@@ -22,6 +23,9 @@ s["claude"]["usage"]["windows"] = [
 s["codex"]["usage"]["windows"] = [
     {"label": "5-hour", "pct": 7.0, "resets_at": now + 4*H + 2*60},
     {"label": "Weekly", "pct": 11.0, "resets_at": now + 3*D + 5*H}]
+s["gemini"]["usage"]["windows"] = [
+    {"label": "5-hour · Gemini", "pct": 22.0, "resets_at": now + 3*H + 15*60},
+    {"label": "5-hour · Claude & GPT", "pct": 5.0, "resets_at": now + 4*H + 40*60}]
 sc["two"] = s
 
 s = base()  # heavy: near limits and remote-access trouble
@@ -42,6 +46,11 @@ s["codex"]["workers"]["watchdog"]["last_ok"] = False
 s["codex"]["workers"]["watchdog"]["last_message"] = "stray app-server found; restarting service"
 s["codex"]["workers"]["service"]["relay"]["status"] = "disconnected"
 s["codex"]["workers"]["ssh"]["active"] = False
+s["gemini"]["usage"]["windows"] = [
+    {"label": "5-hour · Gemini", "pct": 94.0, "resets_at": now + 1*H + 45*60},
+    {"label": "5-hour · Claude & GPT", "pct": 72.0, "resets_at": now + 2*H + 10*60}]
+s["gemini"]["workers"]["daemon"]["state"] = "Reconnecting"
+s["gemini"]["workers"]["sessions"] = {"connected": 1, "total": 3}
 sc["heavy"] = s
 
 s = base()  # logged out everywhere
@@ -54,6 +63,11 @@ s["codex"]["account"] = {"logged_in": False}
 s["codex"]["usage"] = {"error": "Codex is not reachable"}
 s["codex"]["tokens"] = None
 s["codex"]["workers"]["service"] = {"running": False, "relay": {"status": "service not running"}}
+s["gemini"]["account"] = {"logged_in": False}
+s["gemini"]["usage"] = {"error": "Not signed in to Gemini (Antigravity)"}
+s["gemini"]["tokens"]["today_total"] = 0; s["gemini"]["tokens"]["today_output"] = 0; s["gemini"]["tokens"]["today_uncached_input"] = 0
+s["gemini"]["workers"]["daemon"] = {"service_active": False, "state": None, "instance_name": None, "link": None}
+s["gemini"]["workers"]["sessions"] = {"connected": 0, "total": 0}
 sc["loggedout"] = s
 
 s = base()  # API error + empty windows + service down
@@ -61,6 +75,8 @@ s["claude"]["usage"] = {"error": "claude.ai is rate-limiting usage checks. Try R
 s["claude"]["workers"]["server"]["service_active"] = False
 s["codex"]["usage"]["windows"] = []
 s["codex"]["usage"]["credits"] = "unlimited"
+s["gemini"]["usage"] = {"error": "Google is rate-limiting quota checks. Try Refresh again in a minute.", "stale": {"plan": "ultra", "credits": 500, "windows": [{"label": "5-hour · Gemini", "pct": 18.0, "resets_at": now + 3*H + 10*60}], "fetched_at": now - 9*60}}
+s["gemini"]["workers"]["daemon"]["service_active"] = False
 sc["apierror"] = s
 
 s = base()  # many windows (layout stress)
@@ -76,6 +92,11 @@ s["codex"]["usage"]["windows"] = [
     {"label": "Weekly", "pct": 40.0, "resets_at": now + 4*D},
     {"label": "5-hour · gpt-5-codex-mini", "pct": 2.0, "resets_at": now + 3*H},
     {"label": "Weekly · gpt-5-codex-mini", "pct": 9.0, "resets_at": now + 4*D}]
+s["gemini"]["usage"]["windows"] = [
+    {"label": "5-hour · Gemini Pro", "pct": 42.0, "resets_at": now + 2*H + 30*60},
+    {"label": "5-hour · Gemini Flash", "pct": 14.0, "resets_at": now + 3*H},
+    {"label": "5-hour · Claude & GPT", "pct": 6.0, "resets_at": now + 4*H},
+    {"label": "Weekly · Gemini Pro", "pct": 29.0, "resets_at": now + 5*D}]
 sc["many"] = s
 
 s = base()  # codex section missing, claude workers missing
@@ -105,27 +126,34 @@ def with_history(s):
         {"at": now - 5*H + 61, "msg": "restarting background service"},
         {"at": now - 4*H - 20*60, "msg": "background service not running; starting it"},
         {"at": now - 4*H - 20*60 + 3, "msg": "background service is back"}]}
+    gd = s["gemini"]["workers"]["daemon"]
+    gd["since"] = now - 5*H - 20*60
+    gd["drops_today"] = [{"at": now - 2*H, "secs": 8}, {"at": now - 50*60, "secs": 4}]
     return s
 
 hist = with_history(copy.deepcopy(sc["two"]))
 (out / "history.json").write_text(json.dumps(hist))
 
-# streamed: saved numbers first (dimmed, "updating…"), then Claude limits, then Codex
+# streamed: saved numbers first (dimmed, "updating…"), then Claude + Gemini limits, then Codex
 old = copy.deepcopy(hist)
 old["claude"]["usage"]["windows"] = [
     {"label": "5-hour", "pct": 21.0, "resets_at": now + 2*H + 10*60},
     {"label": "Weekly", "pct": 22.0, "resets_at": now + 3*D + 22*H}]
 old["codex"]["usage"]["windows"] = [{"label": "5-hour", "pct": 3.0, "resets_at": now + 4*H}, {"label": "Weekly", "pct": 9.0, "resets_at": now + 3*D + 5*H}]
 old["codex"]["tokens"]["today"] = 1000000
-f1 = copy.deepcopy(old); f1["pending"] = ["claude.usage", "codex.usage", "codex.tokens"]
-f2 = copy.deepcopy(old); f2["claude"]["usage"] = hist["claude"]["usage"]; f2["pending"] = ["codex.usage", "codex.tokens"]
+old["gemini"]["usage"]["windows"] = [
+    {"label": "5-hour · Gemini", "pct": 14.0, "resets_at": now + 3*H + 15*60},
+    {"label": "5-hour · Claude & GPT", "pct": 2.0, "resets_at": now + 4*H + 40*60}]
+f1 = copy.deepcopy(old); f1["pending"] = ["claude.usage", "gemini.usage", "codex.usage", "codex.tokens"]
+f2 = copy.deepcopy(old); f2["claude"]["usage"] = hist["claude"]["usage"]; f2["gemini"]["usage"] = hist["gemini"]["usage"]; f2["pending"] = ["codex.usage", "codex.tokens"]
 f3 = copy.deepcopy(hist); f3["pending"] = []
 (out / "stream.stream").write_text("\n".join([line(0.05, f1), line(1.2, f2), line(1.2, f3)]) + "\n")
 
 # first ever run: nothing saved yet, so loading parts show skeletons
-g1 = copy.deepcopy(hist); g1["claude"]["usage"] = None; g1["codex"]["usage"] = None; g1["codex"]["tokens"] = None
+g1 = copy.deepcopy(hist); g1["claude"]["usage"] = None; g1["codex"]["usage"] = None; g1["codex"]["tokens"] = None; g1["gemini"]["usage"] = None
 g1["claude"]["workers"]["server"]["drops_today"] = None
-g1["pending"] = ["claude.usage", "codex.usage", "codex.tokens", "claude.drops"]
+g1["gemini"]["workers"]["daemon"]["drops_today"] = None
+g1["pending"] = ["claude.usage", "gemini.usage", "codex.usage", "codex.tokens", "claude.drops", "gemini.drops"]
 (out / "firstever.stream").write_text("\n".join([line(0.05, g1), line(1.6, f3)]) + "\n")
 
 # collector dies after the first frame

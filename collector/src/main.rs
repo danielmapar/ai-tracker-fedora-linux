@@ -1,33 +1,37 @@
-//! agent-usage: print one JSON snapshot of Claude and Codex account usage plus the health of the
-//! remote-access workers on this machine, then exit. Run on demand by the GNOME top-bar widget;
-//! it never runs in the background.
+//! agent-usage: print one JSON snapshot of Claude, Codex and Gemini (Antigravity) account usage
+//! plus the health of the remote-access workers on this machine, then exit. Run on demand by the
+//! GNOME top-bar widget; it never runs in the background.
 //!
 //! Read-only: the collector itself never refreshes or rewrites login tokens and never starts, stops
-//! or changes a service. (Two fallbacks run other tools: `claude auth status` for unusual Claude
-//! login setups, and a private short-lived `codex app-server` when the Codex background service is
-//! not running; what those do with their own logins is up to them.)
+//! or changes a service. (Fallbacks run other tools read-only: `claude auth status` for unusual
+//! Claude login setups, `secret-tool lookup` for Gemini's keyring login, and a private short-lived
+//! `codex app-server` when the Codex background service is not running.)
 //!
 //! It writes only to ~/.cache/agent-usage/ (directory 0700, files 0600):
-//!   claude-tokens-v1.bin     incremental transcript token counts
+//!   claude-tokens-v1.bin     incremental Claude transcript token counts
+//!   gemini-tokens-v1.bin     incremental Gemini transcript token counts
 //!   claude-usage-last.json   the last good Claude limits (shown when the API refuses)
 //!   codex-usage-last.json    the last good Codex limits (shown when they fail to load)
 //!   codex-tokens-last.json   the last good Codex token totals (idem)
+//!   gemini-usage-last.json   the last good Gemini quota limits, plan & credits (idem)
 //!   claude-drops-v2.json     journal cursor + today's Claude server reconnects
 //!   codex-events-v1.json     journal cursor + today's Codex watchdog messages
+//!   gemini-drops-v1.json     journal cursor + today's Gemini daemon reconnects
 //!   last-snapshot.json       the last complete output, incl. account emails and session titles
 //!
-//! Live Claude plan limits are opt-in (see `claude_live_enabled`); without them the access token is
-//! never kept or sent anywhere.
+//! Live Claude plan limits are opt-in (see `claude_live_enabled`); live Gemini quota limits are on
+//! by default and can be turned off with `"gemini_live_limits": false` in config.json.
 //!
 //! Speed: every source is read concurrently, so the wall time is that of the slowest live API.
-//! Claude's account comes straight from ~/.claude.json and ~/.claude/.credentials.json (no
-//! `claude auth status`, unless an unusual login setup needs the CLI to interpret it); "tokens
-//! today" is incremental (see tokens.rs); the Codex app-server calls are pipelined; and the worker
-//! checks use one `systemctl --user show` for all units plus the two journal tails.
+//! Claude's account comes straight from ~/.claude.json and ~/.claude/.credentials.json; "tokens
+//! today" is incremental (see tokens.rs); the Codex app-server calls are pipelined; Gemini's two
+//! Cloud Code quota calls run concurrently; and the worker checks use one `systemctl --user show`
+//! for all four units plus one `/proc` walk and parallel journal tails.
 //!
 //! Environment (for testing): AGENT_USAGE_TRACE=1 prints per-source timings to stderr;
-//! AGENT_USAGE_OFFLINE=1 (or --offline) skips the two live usage APIs; AGENT_USAGE_NO_CACHE=1 does a
-//! full transcript scan without the cache; AGENT_USAGE_CACHE_DIR overrides the cache directory.
+//! AGENT_USAGE_OFFLINE=1 (or --offline) skips live usage APIs; AGENT_USAGE_NO_CACHE=1 does a full
+//! transcript scan without the cache; AGENT_USAGE_CACHE_DIR overrides the cache directory;
+//! AGENT_USAGE_GEMINI_URL overrides the Gemini Cloud Code endpoint (https:// or http://127.0.0.1:).
 
 mod tokens;
 
@@ -40,7 +44,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -62,7 +66,7 @@ fn env_on(k: &str) -> bool {
 
 // ---------- tracing (AGENT_USAGE_TRACE=1; timings only, never values) ----------
 
-static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static T0: OnceLock<Instant> = OnceLock::new();
 static TRACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn trace(what: impl AsRef<str>) {
@@ -219,12 +223,13 @@ fn journal_lines(unit: &str, n: &str) -> Vec<String> {
 const CLAUDE_UNIT: &str = "claude-remote-control.service";
 const CODEX_UNIT: &str = "codex-remote-control.service";
 const CODEX_TIMER: &str = "codex-remote-control.timer";
+const GEMINI_UNIT: &str = "antigravity-cli-daemon.service";
 
 /// One `systemctl --user show` for all user units: unit -> {property -> value}.
 fn user_units() -> HashMap<&'static str, HashMap<String, String>> {
-    let units = [CLAUDE_UNIT, CODEX_UNIT, CODEX_TIMER];
+    let units = [CLAUDE_UNIT, CODEX_UNIT, CODEX_TIMER, GEMINI_UNIT];
     let out = run_out(&[
-        "systemctl", "--user", "show", units[0], units[1], units[2],
+        "systemctl", "--user", "show", units[0], units[1], units[2], units[3],
         "-p", "ActiveState", "-p", "ActiveEnterTimestamp", "-p", "ExecMainExitTimestamp", "-p", "Result",
         "--timestamp=unix",
     ]);
@@ -368,8 +373,8 @@ fn claude_account_cli(creds: Option<&Value>) -> Value {
 /// `~/.cache/agent-usage/claude-usage-last.json`; when a later fetch fails (HTTP 429 rate limit,
 /// offline, expired login) the saved numbers are returned under `stale` with their `fetched_at`,
 /// so the widget can show them marked as old. Display-only: the cache never triggers a fetch.
-fn claude_usage(creds: Option<&Value>) -> Value {
-    if !claude_live_enabled() {
+fn claude_usage(creds: Option<&Value>, live: bool) -> Value {
+    if !live {
         // Off by default: no token use, no request, and no saved numbers shown either.
         return json!({ "off": true });
     }
@@ -770,6 +775,462 @@ fn claude_sessions(h: &Path) -> Value {
     json!({ "total": total, "connected": connected, "not_connected": offline })
 }
 
+// ---------- Gemini (Google Antigravity CLI) ----------
+
+enum GeminiCreds {
+    ApiKey,
+    SignedOut,
+    OAuth {
+        email: Option<String>,
+        auth_method: String,
+        expiry: Option<i64>,
+        /// Kept in memory ONLY when `gemini_live_enabled()` is true; never logged or written to disk.
+        access_token: Option<String>,
+    },
+}
+
+fn load_gemini_creds(settings: Option<&Value>, with_token: bool) -> GeminiCreds {
+    if settings.and_then(|s| s["modelProvider"].as_str()) == Some("gemini") && env_on("GEMINI_API_KEY") {
+        return GeminiCreds::ApiKey;
+    }
+    let Some((0, out)) = run(&["secret-tool", "lookup", "service", "gemini", "username", "antigravity"]) else {
+        return GeminiCreds::SignedOut;
+    };
+    trace("gemini keyring: done");
+    let Ok(d) = serde_json::from_str::<Value>(out.trim()) else {
+        return GeminiCreds::SignedOut;
+    };
+    let tok = &d["token"];
+    let has_access = tok["access_token"].as_str().is_some_and(|s| !s.is_empty());
+    let has_refresh = tok["refresh_token"].as_str().is_some_and(|s| !s.is_empty());
+    if !has_access && !has_refresh {
+        return GeminiCreds::SignedOut;
+    }
+    let access_token = if with_token {
+        tok["access_token"].as_str().filter(|s| !s.is_empty()).map(String::from)
+    } else {
+        None
+    };
+    let expiry = tok["expiry"].as_str().and_then(parse_iso);
+    let email = d["id_token_email"].as_str().filter(|s| !s.is_empty()).map(String::from);
+    let auth_method = match d["auth_method"].as_str().unwrap_or("") {
+        "consumer" | "" => "google".into(),
+        "business" | "enterprise" => "enterprise".into(),
+        "adc" => "adc".into(),
+        other => other.into(),
+    };
+    // `d` (including `refresh_token`) drops here immediately.
+    GeminiCreds::OAuth { email, auth_method, expiry, access_token }
+}
+
+fn gemini_account(creds: &GeminiCreds, last_snap: Option<&Value>) -> Value {
+    match creds {
+        GeminiCreds::ApiKey => json!({
+            "logged_in": true,
+            "email": Value::Null,
+            "plan": Value::Null,
+            "auth_method": "apikey",
+        }),
+        GeminiCreds::SignedOut => json!({ "logged_in": false }),
+        GeminiCreds::OAuth { email, auth_method, .. } => {
+            let plan = email.as_deref().and_then(|em| {
+                last_snap
+                    .filter(|p| p["gemini"]["account"]["email"].as_str() == Some(em))
+                    .and_then(|p| p["gemini"]["account"]["plan"].as_str())
+                    .map(String::from)
+            });
+            json!({
+                "logged_in": true,
+                "email": email,
+                "plan": plan,
+                "auth_method": auth_method,
+            })
+        }
+    }
+}
+
+/// Security invariant: never send Bearer token over non-loopback HTTP.
+fn gemini_base_url() -> String {
+    if let Ok(u) = std::env::var("AGENT_USAGE_GEMINI_URL") {
+        let u = u.trim_end_matches('/');
+        if u.starts_with("https://") || u.starts_with("http://127.0.0.1:") {
+            return u.to_string();
+        }
+    }
+    "https://daily-cloudcode-pa.googleapis.com".to_string()
+}
+
+fn gemini_tier_plan(tier: &Value) -> Option<&'static str> {
+    let obj = tier.as_object()?;
+    let id = obj.get("id").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    let name = obj.get("name").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    let words: Vec<&str> = id
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .chain(name.split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    for (needle, plan) in [
+        ("ultra", "ultra"),
+        ("enterprise", "enterprise"),
+        ("standard", "standard"),
+        ("free", "free"),
+        ("pro", "pro"),
+    ] {
+        if words.contains(&needle) {
+            return Some(plan);
+        }
+    }
+    None
+}
+
+fn gemini_plan(lca: &Value) -> Option<String> {
+    gemini_tier_plan(&lca["paidTier"])
+        .or_else(|| gemini_tier_plan(&lca["currentTier"]))
+        .map(String::from)
+}
+
+fn gemini_credits(lca: &Value) -> Value {
+    let Some(arr) = lca["paidTier"]["availableCredits"].as_array() else {
+        return Value::Null;
+    };
+    let parse_amt = |v: &Value| -> Option<Value> {
+        if let Some(n) = v.as_i64() {
+            return Some(json!(n));
+        }
+        if let Some(n) = v.as_u64() {
+            return Some(json!(n));
+        }
+        if let Some(f) = v.as_f64() {
+            return if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                Some(json!(f as i64))
+            } else if f.is_finite() {
+                Some(json!(f))
+            } else {
+                None
+            };
+        }
+        if let Some(s) = v.as_str() {
+            let s = s.trim();
+            if let Ok(n) = s.parse::<i64>() {
+                return Some(json!(n));
+            }
+            if let Ok(f) = s.parse::<f64>() {
+                if f.is_finite() {
+                    return Some(json!(f));
+                }
+            }
+        }
+        None
+    };
+    arr.iter()
+        .find(|c| c["creditType"].as_str() == Some("GOOGLE_ONE_AI") && !c["creditAmount"].is_null())
+        .or_else(|| arr.iter().find(|c| !c["creditAmount"].is_null()))
+        .and_then(|c| parse_amt(&c["creditAmount"]))
+        .unwrap_or(Value::Null)
+}
+
+#[derive(Clone, Copy)]
+struct WinAgg {
+    pct: f64,
+    resets_at: Option<i64>,
+}
+
+impl WinAgg {
+    fn add(slot: &mut Option<WinAgg>, pct: f64, resets_at: Option<i64>) {
+        match slot {
+            None => *slot = Some(WinAgg { pct, resets_at }),
+            Some(w) => {
+                if pct > w.pct {
+                    w.pct = pct;
+                }
+                w.resets_at = match (w.resets_at, resets_at) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+            }
+        }
+    }
+}
+
+fn gemini_windows(ruq: &Value, now_secs: i64) -> Vec<Value> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        GemPro,
+        GemFlash,
+        GemOther,
+        ClaudeGpt,
+    }
+    struct Item {
+        weekly: bool,
+        kind: Kind,
+        pct: f64,
+        resets_at: Option<i64>,
+    }
+
+    let mut items = Vec::new();
+    let mut has_non_gemini = false;
+    for b in ruq["buckets"].as_array().into_iter().flatten() {
+        let Some(model_id) = b["modelId"].as_str() else { continue };
+        let mid = model_id.to_ascii_lowercase();
+        if mid.starts_with("tab_") {
+            continue;
+        }
+        let Some(rem) = b["remainingFraction"].as_f64().filter(|x| x.is_finite()) else { continue };
+        let used_pct = ((1.0 - rem.clamp(0.0, 1.0)) * 1000.0).round() / 10.0;
+        let resets_at = b["resetTime"].as_str().and_then(parse_iso);
+        if resets_at.is_none() && used_pct == 0.0 {
+            continue;
+        }
+        let kind = if mid.starts_with("gemini") {
+            if ["pro", "carbon", "neon", "argon", "ultra"].iter().any(|k| mid.contains(k)) {
+                Kind::GemPro
+            } else if ["flash", "hydrogen"].iter().any(|k| mid.contains(k)) {
+                Kind::GemFlash
+            } else {
+                Kind::GemOther
+            }
+        } else if mid.starts_with("claude") || mid.starts_with("gpt") {
+            has_non_gemini = true;
+            Kind::ClaudeGpt
+        } else {
+            continue;
+        };
+        let weekly = resets_at.is_some_and(|r| r - now_secs > 6 * 3600);
+        items.push(Item { weekly, kind, pct: used_pct, resets_at });
+    }
+
+    let mut out = Vec::new();
+    for (weekly, span) in [(false, "5-hour"), (true, "Weekly")] {
+        let gem: Vec<&Item> = items
+            .iter()
+            .filter(|it| it.weekly == weekly && it.kind != Kind::ClaudeGpt)
+            .collect();
+        if !gem.is_empty() {
+            let key0 = ((gem[0].pct * 10.0).round() as i64, gem[0].resets_at);
+            let same = gem.iter().all(|it| ((it.pct * 10.0).round() as i64, it.resets_at) == key0);
+            if same {
+                let mut agg = None;
+                for it in &gem {
+                    WinAgg::add(&mut agg, it.pct, it.resets_at);
+                }
+                if let Some(w) = agg {
+                    let label = if has_non_gemini { format!("{span} · Gemini") } else { span.to_string() };
+                    out.push(json!({ "label": label, "pct": w.pct, "resets_at": w.resets_at }));
+                }
+            } else {
+                let (mut pro, mut flash, mut other) = (None, None, None);
+                for it in &gem {
+                    match it.kind {
+                        Kind::GemPro => WinAgg::add(&mut pro, it.pct, it.resets_at),
+                        Kind::GemFlash => WinAgg::add(&mut flash, it.pct, it.resets_at),
+                        Kind::GemOther => WinAgg::add(&mut other, it.pct, it.resets_at),
+                        Kind::ClaudeGpt => {}
+                    }
+                }
+                for (sub, agg) in [("Gemini Pro", pro), ("Gemini Flash", flash), ("Gemini", other)] {
+                    if let Some(w) = agg {
+                        out.push(json!({ "label": format!("{span} · {sub}"), "pct": w.pct, "resets_at": w.resets_at }));
+                    }
+                }
+            }
+        }
+        let mut cg = None;
+        for it in items.iter().filter(|it| it.weekly == weekly && it.kind == Kind::ClaudeGpt) {
+            WinAgg::add(&mut cg, it.pct, it.resets_at);
+        }
+        if let Some(w) = cg {
+            out.push(json!({ "label": format!("{span} · Claude & GPT"), "pct": w.pct, "resets_at": w.resets_at }));
+        }
+    }
+    out
+}
+
+fn gemini_usage(creds: &GeminiCreds, live: bool) -> Value {
+    if matches!(creds, GeminiCreds::ApiKey) {
+        return json!({ "windows": [], "credits": Value::Null });
+    }
+    if !live {
+        return json!({ "off": true });
+    }
+    let v = gemini_usage_live(creds);
+    let ok = v.get("windows").is_some();
+    with_last_good("gemini-usage-last.json", v, ok)
+}
+
+fn gemini_usage_live(creds: &GeminiCreds) -> Value {
+    let GeminiCreds::OAuth { expiry, access_token, .. } = creds else {
+        return json!({ "error": "Not signed in to Gemini (Antigravity)" });
+    };
+    if expiry.is_some_and(|exp| exp < now()) {
+        return json!({ "error": "Login token expired. Use any Antigravity session and it renews." });
+    }
+    let Some(token) = access_token.as_deref() else {
+        return json!({ "error": "Not signed in to Gemini (Antigravity)" });
+    };
+    if env_on("AGENT_USAGE_OFFLINE") || std::env::args().any(|a| a == "--offline") {
+        return json!({ "error": "offline (AGENT_USAGE_OFFLINE)" });
+    }
+    let base = gemini_base_url();
+    let auth = format!("Bearer {token}");
+    let (lca_res, ruq_res) = thread::scope(|s| {
+        let lca = s.spawn(|| {
+            ureq::post(&format!("{base}/v1internal:loadCodeAssist"))
+                .set("Authorization", &auth)
+                .set("Content-Type", "application/json")
+                .set("User-Agent", "antigravity/1.5")
+                .timeout(Duration::from_secs(8))
+                .send_json(json!({
+                    "metadata": {
+                        "ideType": "IDE_UNSPECIFIED",
+                        "platform": "PLATFORM_UNSPECIFIED",
+                        "pluginType": "GEMINI",
+                    }
+                }))
+        });
+        let ruq = ureq::post(&format!("{base}/v1internal:retrieveUserQuota"))
+            .set("Authorization", &auth)
+            .set("Content-Type", "application/json")
+            .set("User-Agent", "antigravity/1.5")
+            .timeout(Duration::from_secs(8))
+            .send_json(json!({}));
+        (lca.join().ok(), ruq)
+    });
+    trace("gemini usage: responses");
+
+    let ruq: Value = match ruq_res {
+        Ok(r) => match r.into_json() {
+            Ok(v) => v,
+            Err(_) => return json!({ "error": "Unreadable quota response" }),
+        },
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            return json!({ "error": "Login token rejected. Use any Antigravity session and it renews." });
+        }
+        Err(ureq::Error::Status(429, _)) => {
+            return json!({ "error": "Google is rate-limiting quota checks. Try Refresh again in a minute." });
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            return json!({ "error": format!("Quota endpoint returned HTTP {code}") });
+        }
+        Err(_) => return json!({ "error": "Could not reach Google Cloud Code (offline?)" }),
+    };
+
+    let lca: Option<Value> = lca_res.and_then(|r| r.ok()).and_then(|r| r.into_json().ok());
+    let plan = lca.as_ref().and_then(gemini_plan);
+    let credits = lca.as_ref().map(gemini_credits).unwrap_or(Value::Null);
+    let windows = gemini_windows(&ruq, now());
+    json!({
+        "windows": windows,
+        "credits": credits,
+        "plan": plan,
+    })
+}
+
+fn gemini_daemon(active: bool, since: Option<i64>, lines: &[String]) -> Value {
+    let mut state = None;
+    let mut instance_name = None;
+    let mut link = None;
+    for l in lines.iter().rev() {
+        if state.is_none() {
+            if l.contains("Reconnected") {
+                state = Some("Connected".to_string());
+            } else {
+                for s in ["Connected", "Ready", "Reconnecting", "Connecting", "Disconnected", "Error"] {
+                    if l.contains(s) {
+                        state = Some(s.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        if instance_name.is_none() {
+            for prefix in ["Instance name: ", "Hostname: "] {
+                if let Some(i) = l.find(prefix) {
+                    let raw = l[i + prefix.len()..].trim();
+                    if !raw.is_empty() && !raw.to_ascii_lowercase().contains("not assigned yet") {
+                        let cleaned: String = raw.chars().filter(|c| !c.is_control()).take(60).collect();
+                        let cleaned = cleaned.trim().to_string();
+                        if !cleaned.is_empty() {
+                            instance_name = Some(cleaned);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if link.is_none() {
+            if let Some(i) = l.find("https://antigravity.google.com") {
+                link = l[i..].split_whitespace().next().map(|s| s.to_string());
+            }
+        }
+    }
+    if active && state.is_none() {
+        if lines.iter().any(|l| l.contains("Remote control enabled") || l.contains("Language server listening")) {
+            state = Some("Connected".to_string());
+        }
+    }
+    if active && link.is_none() {
+        link = Some("https://antigravity.google.com".to_string());
+    }
+    json!({
+        "service_active": active,
+        "since": if active { json!(since) } else { Value::Null },
+        "state": state,
+        "instance_name": instance_name,
+        "link": link,
+        "drops_today": Value::Null,
+    })
+}
+
+const GEMINI_DROPS_FILE: &str = "gemini-drops-v1.json";
+
+/// Today's brief disconnects of `antigravity-cli-daemon.service`, read incrementally via journal cursor.
+fn gemini_drops(midnight: i64) -> Value {
+    let (mut cursor, state) = load_day_cache(GEMINI_DROPS_FILE, midnight);
+    let mut events: Vec<(i64, i64)> = state["events"]
+        .as_array()
+        .or_else(|| state.as_array())
+        .map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_i64()?))).collect())
+        .unwrap_or_default();
+    let mut disc_at: Option<i64> = state["disc_at"].as_i64();
+    let Some((out, rescanned)) = journal_incremental(GEMINI_UNIT, midnight, &mut cursor, true) else {
+        return Value::Null;
+    };
+    trace(format!("gemini drops: {} read", if rescanned { "full-day" } else { "incremental" }));
+    if rescanned {
+        events.clear();
+        disc_at = None;
+    }
+    for line in out.lines() {
+        let clean = strip_ansi(line);
+        let Some(at) = journal_ts(&clean) else { continue };
+        if at < midnight {
+            continue;
+        }
+        if let Some(i) = clean.find("Reconnected after ") {
+            if let Some(secs) = parse_dur(&clean[i + 18..]) {
+                events.push((at, secs));
+                disc_at = None;
+                continue;
+            }
+        }
+        if clean.contains("Started ") || clean.contains("Starting ") {
+            disc_at = None;
+            continue;
+        }
+        if clean.contains("Reconnecting") || clean.contains("disconnected") || clean.contains("Disconnected") {
+            disc_at.get_or_insert(at);
+        } else if clean.contains("Connected") {
+            if let Some(d0) = disc_at.take() {
+                events.push((at, (at - d0).max(1)));
+            }
+        }
+    }
+    save_day_cache(GEMINI_DROPS_FILE, midnight, &cursor, json!({ "events": events, "disc_at": disc_at }));
+    json!(events.iter().map(|(at, secs)| json!({ "at": at, "secs": secs })).collect::<Vec<_>>())
+}
+
 // ---------- Codex ----------
 
 /// JSON-RPC to a Codex app-server: the running background service over its control socket
@@ -949,28 +1410,118 @@ fn process_start(pid: u32) -> Option<i64> {
     (hz > 0).then(|| btime + ticks / hz as i64)
 }
 
-/// (managed background service running, its start time, stray unmanaged servers) from /proc.
-fn codex_processes() -> (bool, Option<i64>, i32) {
+/// Classify an `agy` process's arguments (after argv[0]):
+/// `Some(connected)` for an interactive terminal session (`connected` = `--remote-control` present),
+/// `None` for non-interactive flags (`-p`, `--print`, `--prompt`, `-h`, `--help`, `-v`, `--version`)
+/// or CLI subcommands (`agy models`, `agy remote-control`, `agy mcp`, ...).
+fn agy_interactive_session(args: &[&[u8]]) -> Option<bool> {
+    const SUBCOMMANDS: &[&[u8]] = &[
+        b"acp", b"agent", b"agents", b"changelog", b"help", b"install",
+        b"mcp", b"mic-serve", b"models", b"plugin", b"plugins",
+        b"remote-control", b"update",
+    ];
+    const VALUE_FLAGS: &[&[u8]] = &[
+        b"--conversation", b"-r", b"--resume", b"-m", b"--model",
+        b"-i", b"--prompt-interactive", b"--input-format", b"--output-format",
+        b"--json-schema", b"--print-timeout",
+        b"--effort", b"--mode", b"--agent", b"--project", b"--log-file",
+        b"--settings", b"--add-dir", b"-C", b"--cwd", b"-w", b"--worktree",
+    ];
+    let mut connected = false;
+    let mut saw_positional = false;
+    let mut after_ddash = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if !after_ddash {
+            if a == b"--" {
+                after_ddash = true;
+                i += 1;
+                continue;
+            }
+            if matches!(a, b"-p" | b"--print" | b"--prompt" | b"-h" | b"--help" | b"-v" | b"--version")
+                || a.starts_with(b"--prompt=")
+                || a.starts_with(b"--print=")
+            {
+                return None;
+            }
+            if a == b"--remote-control" {
+                connected = true;
+                i += 1;
+                continue;
+            }
+            if VALUE_FLAGS.contains(&a) {
+                i += 2;
+                continue;
+            }
+            if a.starts_with(b"-") {
+                i += 1;
+                continue;
+            }
+        }
+        if !saw_positional {
+            saw_positional = true;
+            if SUBCOMMANDS.contains(&a) {
+                return None;
+            }
+        }
+        i += 1;
+    }
+    Some(connected)
+}
+
+#[derive(Default)]
+struct ProcScan {
+    codex_managed: bool,
+    codex_since: Option<i64>,
+    codex_stray: i32,
+    agy_total: i32,
+    agy_connected: i32,
+}
+
+/// Single-pass `/proc` scan for both Codex app-servers and interactive `agy` terminal sessions.
+fn scan_processes() -> ProcScan {
+    use std::os::unix::fs::MetadataExt;
     let managed_dir = home().join(".codex/packages/app-server-daemon").to_string_lossy().into_owned();
-    let (mut managed, mut since, mut stray) = (false, None, 0);
-    let Ok(rd) = fs::read_dir("/proc") else { return (false, None, 0) };
+    let mut out = ProcScan::default();
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let Ok(rd) = fs::read_dir("/proc") else { return out };
     for e in rd.flatten() {
         let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(md) = e.metadata() else { continue };
+        if md.uid() != uid {
+            continue;
+        }
         let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else { continue };
-        let mut args = raw.split(|b| *b == 0).filter(|a| !a.is_empty());
-        if !args.clone().any(|a| a == b"app-server") { continue; }
-        if args.clone().any(|a| a == b"daemon" || a == b"proxy") { continue; }
-        let exe = fs::read_link(format!("/proc/{pid}/exe")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        if exe.starts_with(&managed_dir) {
-            if args.any(|a| a == b"--remote-control") {
-                managed = true;
-                since = process_start(pid);
+        let args: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
+        if args.is_empty() {
+            continue;
+        }
+        let Ok(exe_link) = fs::read_link(format!("/proc/{pid}/exe")) else { continue };
+        let exe = exe_link.to_string_lossy();
+        let exe_clean = exe.strip_suffix(" (deleted)").unwrap_or(&exe);
+        if Path::new(exe_clean).file_name().and_then(|s| s.to_str()) == Some("agy") {
+            if let Some(conn) = agy_interactive_session(&args[1..]) {
+                out.agy_total += 1;
+                if conn {
+                    out.agy_connected += 1;
+                }
             }
-        } else if args.clone().any(|a| a == b"--listen") && args.any(|a| a.starts_with(b"unix://")) {
-            stray += 1;
+            continue;
+        }
+        if args.contains(&&b"app-server"[..]) && !args.iter().any(|a| *a == b"daemon" || *a == b"proxy") {
+            if exe_clean.starts_with(&managed_dir) {
+                if args.contains(&&b"--remote-control"[..]) {
+                    out.codex_managed = true;
+                    out.codex_since = process_start(pid);
+                }
+            } else if args.contains(&&b"--listen"[..]) && args.iter().any(|a| a.starts_with(b"unix://")) {
+                out.codex_stray += 1;
+            }
         }
     }
-    (managed, since, stray)
+    out
 }
 
 /// Results flow to main() as (part, value) as soon as each one is known (see PARTS).
@@ -1127,9 +1678,11 @@ const PARTS: &[(&str, &[&str], bool)] = &[
     ("codex.relay", &["codex", "workers", "service", "relay"], true),
     ("claude.drops", &["claude", "workers", "server", "drops_today"], true),
     ("codex.events", &["codex", "workers", "watchdog", "events_today"], true),
+    ("gemini.drops", &["gemini", "workers", "daemon", "drops_today"], true),
     ("claude.usage", &["claude", "usage"], false),
     ("codex.usage", &["codex", "usage"], false),
     ("codex.tokens", &["codex", "tokens"], false),
+    ("gemini.usage", &["gemini", "usage"], false),
 ];
 /// How long (from start) the first frame waits for the soft parts before it goes out without them.
 const SOFT_WAIT: Duration = Duration::from_millis(60);
@@ -1141,6 +1694,11 @@ fn part_path(key: &str) -> &'static [&'static str] {
     PARTS.iter().find(|p| p.0 == key).map(|p| p.1).unwrap_or(&[])
 }
 
+fn gemini_unreachable() -> Value {
+    let offline = env_on("AGENT_USAGE_OFFLINE") || std::env::args().any(|a| a == "--offline");
+    json!({ "error": if offline { "offline (AGENT_USAGE_OFFLINE)" } else { "Could not reach Google Cloud Code (offline?)" } })
+}
+
 /// What a part is when it never arrived (its sender ended without sending it): the same values as
 /// before streaming.
 fn part_default(key: &str) -> Value {
@@ -1148,6 +1706,7 @@ fn part_default(key: &str) -> Value {
         "codex.account" => json!({ "logged_in": false }),
         "codex.usage" => codex_unreachable(),
         "codex.relay" => json!({ "status": "unknown" }),
+        "gemini.usage" => gemini_unreachable(),
         _ => Value::Null,
     }
 }
@@ -1173,22 +1732,22 @@ fn write_line(v: &Value, pretty: bool) {
     let _ = out.flush();
 }
 
-/// Usage: agent-usage [--stream] [--pretty] [--offline]
-///   default   one JSON snapshot on stdout once everything is in.
-///   --stream  newline-delimited snapshots: the first right after the local checks (~15 ms) with
-///             "pending": [parts still loading] (shown with their last saved values), then one per
-///             part as it lands, the last with "pending": []. The widget draws each one.
-/// Live Claude plan limits are opt-in. They come from an undocumented Anthropic endpoint that needs
-/// the Claude Code login token, and Anthropic's terms describe that login as meant for Claude Code
-/// and its own apps. Turn on with `{"claude_live_limits": true}` in
-/// ${XDG_CONFIG_HOME:-~/.config}/ai-tracker/config.json.
-fn claude_live_enabled() -> bool {
+fn tracker_config() -> Option<Value> {
     let dir = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"));
     read_json(&dir.join("ai-tracker/config.json"))
-        .is_some_and(|c| c["claude_live_limits"].as_bool() == Some(true))
+}
+
+/// Live Claude plan limits are opt-in (`{"claude_live_limits": true}`).
+fn claude_live_enabled(cfg: Option<&Value>) -> bool {
+    cfg.is_some_and(|c| c["claude_live_limits"].as_bool() == Some(true))
+}
+
+/// Live Gemini quota limits are on by default; turn off with `{"gemini_live_limits": false}`.
+fn gemini_live_enabled(cfg: Option<&Value>) -> bool {
+    cfg.and_then(|c| c["gemini_live_limits"].as_bool()) != Some(false)
 }
 
 /// Claude Code's credentials, reduced to what the collector uses: plan, tier, scopes, expiry and whether a
@@ -1208,8 +1767,13 @@ fn read_creds(p: &Path, with_token: bool) -> Option<Value> {
     }}))
 }
 
+/// Usage: agent-usage [--stream] [--pretty] [--offline]
+///   default   one JSON snapshot on stdout once everything is in.
+///   --stream  newline-delimited snapshots: the first right after the local checks (~15 ms) with
+///             "pending": [parts still loading] (shown with their last saved values), then one per
+///             part as it lands, the last with "pending": []. The widget draws each one.
 fn main() {
-    // The process holds a login token: no core dumps (and no ptrace by other processes).
+    // The process holds login tokens: no core dumps (and no ptrace by other processes).
     // SAFETY: prctl with integer arguments has no memory-safety preconditions.
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
@@ -1225,21 +1789,36 @@ fn main() {
     let cache = tokens::cache_dir(&h);
     let (date, midnight) = today();
     trace(format!("today: {date} {midnight}"));
-    // Tiny files, read once and shared: the access token never leaves claude_usage's request.
-    let creds = read_creds(&h.join(".claude/.credentials.json"), claude_live_enabled());
+    let cfg = tracker_config();
+    let live_claude = claude_live_enabled(cfg.as_ref());
+    let live_gemini = gemini_live_enabled(cfg.as_ref());
+    // Tiny files, read once and shared: access tokens never leave their live usage requests.
+    let creds = read_creds(&h.join(".claude/.credentials.json"), live_claude);
     let settings = read_json(&h.join(".claude/settings.json"));
-    let prev = if stream { cache.as_ref().and_then(|d| read_json(&d.join(LAST_FILE))) } else { None };
-    let (creds_ref, date_ref) = (creds.as_ref(), date.as_str());
+    let gemini_settings = read_json(&h.join(".gemini/antigravity-cli/settings.json"));
+    let last_snap = cache.as_ref().and_then(|d| read_json(&d.join(LAST_FILE)));
+    let prev = if stream { last_snap.as_ref() } else { None };
+    let (creds_ref, date_ref, gset_ref) = (creds.as_ref(), date.as_str(), gemini_settings.as_ref());
+    let gcreds_cell: OnceLock<GeminiCreds> = OnceLock::new();
+    let get_gcreds = || gcreds_cell.get_or_init(|| load_gemini_creds(gset_ref, live_gemini));
 
     let (tx, rx) = mpsc::channel::<(&'static str, Value)>();
     let out = thread::scope(|s| {
-        // Slowest first: the two live APIs, then the journal reads.
+        // Slowest first: the live APIs, then the journal reads.
         {
             let tx = tx.clone();
             s.spawn(move || {
-                let v = claude_usage(creds_ref);
+                let v = claude_usage(creds_ref, live_claude);
                 trace("claude usage: done");
                 let _ = tx.send(("claude.usage", v));
+            });
+        }
+        {
+            let tx = tx.clone();
+            s.spawn(move || {
+                let v = gemini_usage(get_gcreds(), live_gemini);
+                trace("gemini usage: done");
+                let _ = tx.send(("gemini.usage", v));
             });
         }
         {
@@ -1265,9 +1844,22 @@ fn main() {
                 let _ = tx.send(("codex.events", v));
             });
         }
+        {
+            let tx = tx.clone();
+            s.spawn(move || {
+                let v = gemini_drops(midnight);
+                trace("gemini drops: done");
+                let _ = tx.send(("gemini.drops", v));
+            });
+        }
         drop(tx);
-        let tokens = s.spawn(|| {
+        let claude_toks = s.spawn(|| {
             let r = tokens::claude_tokens_today(&h, midnight);
+            trace(&r.trace);
+            r.value
+        });
+        let gemini_toks = s.spawn(|| {
+            let r = tokens::gemini_tokens_today(&h, midnight);
             trace(&r.trace);
             r.value
         });
@@ -1287,7 +1879,7 @@ fn main() {
             l
         });
         let ssh = s.spawn(sshd_active);
-        let procs = s.spawn(codex_processes);
+        let procs = s.spawn(scan_processes);
 
         let account = claude_account_direct(&h, creds.as_ref(), settings.as_ref()).unwrap_or_else(|| {
             trace("claude account: falling back to `claude auth status`");
@@ -1297,11 +1889,23 @@ fn main() {
         let sessions = claude_sessions(&h);
         let auto = settings.as_ref().and_then(|v| v["remoteControlAtStartup"].as_bool()).unwrap_or(false);
         trace("claude sessions: done");
+        let gem_account = gemini_account(get_gcreds(), last_snap.as_ref());
+        trace("gemini account: done");
 
         let units = units.join().unwrap_or_default();
         let prop = |u: &str, k: &str| units.get(u).and_then(|p| p.get(k)).cloned();
         let stamp = |u: &str, k: &str| prop(u, k).and_then(|v| v.trim_start_matches('@').parse::<i64>().ok());
         let active = |u: &str| prop(u, "ActiveState").as_deref() == Some("active");
+        let gem_active = active(GEMINI_UNIT);
+        // Only tail the Gemini daemon's journal when it is active: an unregistered unit with zero
+        // journal entries makes `journalctl -n 60` scan the whole user journal backwards (~200 ms).
+        let jgemini = gem_active.then(|| {
+            s.spawn(|| {
+                let l = journal_lines(GEMINI_UNIT, "60");
+                trace("journalctl gemini: done");
+                l
+            })
+        });
         let mut server = claude_server(active(CLAUDE_UNIT), &jclaude.join().unwrap_or_default());
         server["since"] = if active(CLAUDE_UNIT) { json!(stamp(CLAUDE_UNIT, "ActiveEnterTimestamp")) } else { Value::Null };
         let last = jcodex
@@ -1310,15 +1914,19 @@ fn main() {
             .into_iter()
             .rev()
             .find(|l| !(l.starts_with("Starting ") || l.starts_with("Finished ") || l.contains("Consumed ") || l.starts_with("Stopped ")));
-        let (managed, managed_since, stray) = procs.join().unwrap_or((false, None, 0));
+        let gem_since = if gem_active { stamp(GEMINI_UNIT, "ActiveEnterTimestamp") } else { None };
+        let gem_lines = jgemini.and_then(|h| h.join().ok()).unwrap_or_default();
+        let daemon = gemini_daemon(gem_active, gem_since, &gem_lines);
+        let ps = procs.join().unwrap_or_default();
         let ssh = ssh.join().unwrap_or(false);
-        let tokens = tokens.join().unwrap_or(Value::Null);
+        let claude_toks = claude_toks.join().unwrap_or(Value::Null);
+        let gemini_toks = gemini_toks.join().unwrap_or(Value::Null);
         let mut out = json!({
             "generated_at": now(),
             "claude": {
                 "account": account,
                 "usage": null,
-                "tokens": tokens,
+                "tokens": claude_toks,
                 "workers": {
                     "server": server,
                     "sessions": sessions,
@@ -1330,8 +1938,8 @@ fn main() {
                 "usage": null,
                 "tokens": null,
                 "workers": {
-                    "service": { "running": managed, "since": managed_since, "relay": null },
-                    "stray_servers": stray,
+                    "service": { "running": ps.codex_managed, "since": ps.codex_since, "relay": null },
+                    "stray_servers": ps.codex_stray,
                     "watchdog": {
                         "timer_active": active(CODEX_TIMER),
                         "last_run": stamp(CODEX_UNIT, "ExecMainExitTimestamp"),
@@ -1342,11 +1950,33 @@ fn main() {
                     "ssh": { "active": ssh },
                 },
             },
+            "gemini": {
+                "account": gem_account,
+                "usage": null,
+                "tokens": gemini_toks,
+                "workers": {
+                    "daemon": daemon,
+                    "sessions": { "total": ps.agy_total, "connected": ps.agy_connected },
+                },
+            },
         });
         trace("local checks: done");
 
         let mut pending: Vec<&'static str> = PARTS.iter().map(|p| p.0).collect();
         let apply = |out: &mut Value, pending: &mut Vec<&'static str>, (k, v): (&'static str, Value)| {
+            if k == "gemini.usage" {
+                if let Some(p) = v
+                    .get("plan")
+                    .or_else(|| v.get("stale").and_then(|s| s.get("plan")))
+                    .and_then(|x| x.as_str())
+                {
+                    if out["gemini"]["account"]["logged_in"] == json!(true)
+                        && out["gemini"]["account"]["auth_method"] != json!("apikey")
+                    {
+                        out["gemini"]["account"]["plan"] = json!(p);
+                    }
+                }
+            }
             set_path(out, part_path(k), v);
             pending.retain(|p| *p != k);
         };
@@ -1361,7 +1991,7 @@ fn main() {
             let mut f = out.clone();
             for k in pending {
                 let path = part_path(k);
-                let placeholder = prev.as_ref().and_then(|p| get_path(p, path)).cloned().unwrap_or(Value::Null);
+                let placeholder = prev.and_then(|p| get_path(p, path)).cloned().unwrap_or(Value::Null);
                 set_path(&mut f, path, placeholder);
             }
             f["generated_at"] = json!(now());
@@ -1422,6 +2052,110 @@ mod tests {
         assert_eq!(claude_plan("max", None), "max");
         assert_eq!(claude_plan("pro", Some("default_claude_max_20x")), "pro");
         assert_eq!(claude_plan("ultra", None), "ultra");
+    }
+
+    #[test]
+    fn parse_iso_rfc3339_nanoseconds_and_offset() {
+        let with_ns_off = parse_iso("2026-11-20T15:18:51.615636742-08:00").unwrap();
+        let utc = parse_iso("2026-11-20T23:18:51Z").unwrap();
+        let plus_off = parse_iso("2026-11-21T01:18:51.123456789+02:00").unwrap();
+        assert_eq!(with_ns_off, utc);
+        assert_eq!(plus_off, utc);
+    }
+
+    #[test]
+    fn gemini_plan_tiers_and_credits() {
+        let ultra = json!({
+            "currentTier": { "id": "standard-tier", "name": "Gemini Code Assist" },
+            "paidTier": {
+                "id": "g1-ultra-tier",
+                "name": "Google AI Ultra",
+                "availableCredits": [{ "creditType": "GOOGLE_ONE_AI", "creditAmount": "500" }]
+            }
+        });
+        assert_eq!(gemini_plan(&ultra).as_deref(), Some("ultra"));
+        assert_eq!(gemini_credits(&ultra), json!(500));
+
+        let pro = json!({
+            "currentTier": { "id": "free-tier", "name": "Free" },
+            "paidTier": {
+                "id": "g1-pro-tier",
+                "name": "Google AI Pro",
+                "availableCredits": [{ "creditAmount": 250 }]
+            }
+        });
+        assert_eq!(gemini_plan(&pro).as_deref(), Some("pro"));
+        assert_eq!(gemini_credits(&pro), json!(250));
+
+        let free = json!({ "currentTier": { "id": "free-tier", "name": "Free Tier" } });
+        assert_eq!(gemini_plan(&free).as_deref(), Some("free"));
+        assert_eq!(gemini_credits(&free), Value::Null);
+
+        let standard = json!({ "currentTier": { "id": "standard-tier", "name": "Standard" } });
+        assert_eq!(gemini_plan(&standard).as_deref(), Some("standard"));
+
+        let ent = json!({ "paidTier": { "id": "enterprise-tier", "name": "Enterprise" } });
+        assert_eq!(gemini_plan(&ent).as_deref(), Some("enterprise"));
+    }
+
+    #[test]
+    fn gemini_windows_grouping_and_ordering() {
+        let base = parse_iso("2026-11-20T12:00:00Z").unwrap();
+        let t_3h = "2026-11-20T15:00:00Z";
+        let t_2h = "2026-11-20T14:00:00Z";
+        let t_5d = "2026-11-25T12:00:00Z";
+
+        // 1) Unified 5-hour · Gemini + 5-hour · Claude & GPT, tab_* ignored
+        let unified = json!({
+            "buckets": [
+                { "modelId": "tab_flash_lite_preview", "remainingFraction": 0.1, "resetTime": t_3h },
+                { "modelId": "gemini-4-carbon-high", "remainingFraction": 0.75, "resetTime": t_3h },
+                { "modelId": "gemini-3-flash", "remainingFraction": 0.75, "resetTime": t_3h },
+                { "modelId": "claude-sonnet-4-5", "remainingFraction": 0.60, "resetTime": t_2h },
+                { "modelId": "gpt-oss-120b", "remainingFraction": 0.90, "resetTime": t_3h },
+            ]
+        });
+        let w = gemini_windows(&unified, base);
+        let labels: Vec<_> = w.iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["5-hour · Gemini", "5-hour · Claude & GPT"]);
+        assert_eq!(w[0]["pct"], 25.0);
+        assert_eq!(w[1]["pct"], 40.0);
+        assert_eq!(w[1]["resets_at"], parse_iso(t_2h).unwrap());
+
+        // 2) Split Gemini Pro vs Gemini Flash when fractions differ + Weekly (>6h) + Gemini-only label
+        let split = json!({
+            "buckets": [
+                { "modelId": "gemini-3-pro", "remainingFraction": 0.55, "resetTime": t_3h },
+                { "modelId": "gemini-4-argon", "remainingFraction": 0.70, "resetTime": t_2h },
+                { "modelId": "gemini-3-flash", "remainingFraction": 0.90, "resetTime": t_3h },
+                { "modelId": "gemini-4-ultra", "remainingFraction": 0.80, "resetTime": t_5d },
+                { "modelId": "gemini-3-hydrogen", "remainingFraction": 0.80, "resetTime": t_5d },
+            ]
+        });
+        let w2 = gemini_windows(&split, base);
+        let labels2: Vec<_> = w2.iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labels2, ["5-hour · Gemini Pro", "5-hour · Gemini Flash", "Weekly"]);
+        assert_eq!(w2[0]["pct"], 45.0);
+        assert_eq!(w2[0]["resets_at"], parse_iso(t_2h).unwrap()); // earliest reset in Pro group
+        assert_eq!(w2[1]["pct"], 10.0);
+        assert_eq!(w2[2]["pct"], 20.0);
+    }
+
+    #[test]
+    fn agy_cli_session_classification() {
+        let s = |v: &[&[u8]]| agy_interactive_session(v);
+        assert_eq!(s(&[]), Some(false));
+        assert_eq!(s(&[b"--remote-control"]), Some(true));
+        assert_eq!(s(&[b"-c", b"--remote-control"]), Some(true));
+        assert_eq!(s(&[b"-i", b"models"]), Some(false));
+        assert_eq!(s(&[b"--model", b"models", b"--remote-control"]), Some(true));
+        assert_eq!(s(&[b"--agent", b"agent"]), Some(false));
+        assert_eq!(s(&[b"models"]), None);
+        assert_eq!(s(&[b"remote-control"]), None);
+        assert_eq!(s(&[b"mcp", b"list"]), None);
+        assert_eq!(s(&[b"-p", b"hello"]), None);
+        assert_eq!(s(&[b"--prompt=hello"]), None);
+        assert_eq!(s(&[b"--help"]), None);
     }
 
     #[test]

@@ -1,16 +1,16 @@
-# Remote access: Claude Code and Codex from your phone (Linux)
+# Remote access: Claude Code, Codex and Gemini from your phone (Linux)
 
-This page explains how to make Claude Code and Codex sessions on a Linux computer visible and controllable
-from the Claude app, the ChatGPT/Codex app on your phone, and the web. It also covers keeping that
-working through crashes and reboots. It describes a setup that was built and tested on Fedora 44 with
-GNOME 50 (Claude Code 2.1, Codex CLI 0.166), including the problems hit on the way.
+This page explains how to make Claude Code, Codex and Gemini (Antigravity CLI) sessions on a Linux
+computer visible and controllable from your phone and the web. It also covers keeping that working
+through crashes and reboots. It describes a setup that was built and tested on Fedora 44/45 with
+GNOME 50/51, including the problems hit on the way.
 
 Placeholders: `<you>` is your Linux user name, `my-machine` your computer's name, and
 `~/projects/my-project` the folder sessions should start in.
 
-> **Security first.** Remote access means that anyone signed in to your Claude or ChatGPT account can
-> run Claude Code or Codex on this computer, with your user's permissions, from anywhere. Use strong
-> account security (2FA), and keep the SSH server below bound to localhost.
+> **Security first.** Remote access means that anyone signed in to your Claude, ChatGPT or Google
+> account can run Claude Code, Codex or Antigravity on this computer, with your user's permissions,
+> from anywhere. Use strong account security (2FA), and keep the SSH server below bound to localhost.
 
 ## What you end up with
 
@@ -219,6 +219,22 @@ Lessons from building it:
   link: dozens of restarts, and each one also cut the desktop app's SSH connection.
 - In a crash test (killing the daemon), the timer brought it back within about 22 s.
 
+## Gemini (Antigravity CLI)
+
+Antigravity CLI (`agy`) includes built-in Remote Control for both terminal sessions and an always-on
+background daemon:
+
+```sh
+agy remote-control start     # register and start antigravity-cli-daemon.service
+agy remote-control status    # show daemon status and instance name
+agy remote-control stop      # stop and unregister the daemon
+agy --remote-control         # start an interactive terminal session on Remote Control
+```
+
+Inside an already-running `agy` terminal session, `/remote-control` (and `/remote-control off`)
+toggles Remote Control for that session. Open `https://antigravity.google.com` in any browser signed
+in to the same Google account to reach the daemon or shared terminal sessions.
+
 ## After a reboot: checklist
 
 | Piece | Why it comes back |
@@ -228,6 +244,7 @@ Lessons from building it:
 | Claude terminal sessions | `remoteControlAtStartup` in `~/.claude/settings.json` (new sessions join on their own) |
 | Codex daemon | the watchdog timer (enabled, `OnStartupSec=20s`) starts it with remote control on |
 | SSH for the Codex app | `sshd` enabled, localhost only |
+| Gemini (Antigravity) daemon | `antigravity-cli-daemon.service` enabled by `agy remote-control start` |
 
 Running sessions do not survive a reboot. The services do, so you can start new sessions from the
 phone again within about a minute of boot.

@@ -2,13 +2,13 @@
 Type=Application
 Name=AI Tracker
 GenericName=Usage Monitor
-Comment=Claude Code and Codex usage and remote access, in the top bar
+Comment=Claude Code, Codex and Gemini usage and remote access, in the top bar
 Exec="@BIN@/ai-tracker"
 Icon=io.github.danielmapar.AiTracker
 Terminal=false
 StartupNotify=false
 Categories=Utility;
-Keywords=Claude;Codex;usage;limits;tokens;AI;
+Keywords=Claude;Codex;Gemini;Antigravity;usage;limits;tokens;AI;
 Actions=quit;
 
 [Desktop Action quit]

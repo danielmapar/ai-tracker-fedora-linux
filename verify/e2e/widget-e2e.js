@@ -374,23 +374,27 @@ function defineTests(ext) {
     }, 45000);
 
     // ---------------- tabs ----------------
-    test('Tabs', 'Claude shows first; the Codex tab shows Codex, and back', async c => {
+    test('Tabs', 'Claude shows first; Codex and Gemini tabs switch cleanly, and back', async c => {
         await c.show('healthy');
-        ok(c.ind._tabButtons.claude.checked && !c.ind._tabButtons.codex.checked, 'Claude tab selected');
+        ok(c.ind._tabButtons.claude.checked && !c.ind._tabButtons.codex.checked && !c.ind._tabButtons.gemini.checked, 'Claude tab selected');
         c.expectText(/claude\.ai login/, 'Claude page');
         c.tab('codex'); await sleep(500);
         ok(c.ind._tabButtons.codex.checked, 'Codex tab selected');
         c.expectText(/ChatGPT login/, 'Codex page');
         c.expectNoText(/claude\.ai login/, 'Claude page hidden');
+        c.tab('gemini'); await sleep(500);
+        ok(c.ind._tabButtons.gemini.checked, 'Gemini tab selected');
+        c.expectText(/Google login/, 'Gemini page');
+        c.expectNoText(/ChatGPT login/, 'Codex page hidden');
         c.tab('claude'); await sleep(500);
         c.expectText(/claude\.ai login/, 'back on Claude');
     });
 
     test('Tabs', 'a tab with trouble gets a dot; a healthy one does not', async c => {
         await c.show('fixes');
-        ok(c.ind._tabDots.claude.visible && c.ind._tabDots.codex.visible, 'dots on both troubled tabs');
+        ok(c.ind._tabDots.claude.visible && c.ind._tabDots.codex.visible && c.ind._tabDots.gemini.visible, 'dots on all troubled tabs');
         await c.show('healthy');
-        ok(!c.ind._tabDots.claude.visible && !c.ind._tabDots.codex.visible, 'no dots when healthy');
+        ok(!c.ind._tabDots.claude.visible && !c.ind._tabDots.codex.visible && !c.ind._tabDots.gemini.visible, 'no dots when healthy');
     });
 
     // ---------------- account ----------------
@@ -399,6 +403,8 @@ function defineTests(ext) {
         c.expectText(/user@example\.com/); c.expectText(/^Pro$/m, 'Claude plan'); c.expectText(/claude\.ai login/);
         c.tab('codex'); await sleep(500);
         c.expectText(/^Plus$/m, 'Codex plan'); c.expectText(/ChatGPT login/);
+        c.tab('gemini'); await sleep(500);
+        c.expectText(/^Ultra$/m, 'Gemini plan'); c.expectText(/Google login/);
     });
 
     test('Account', 'plan names: Ultra (renamed Max 20x) and Max', async c => {
@@ -422,6 +428,14 @@ function defineTests(ext) {
         await c.click(/^Log in…/, 'Codex log in');
         await waitFor(() => exists(`${SC}/terminal-last.args`), 'a terminal');
         eq(terminalArgs().slice(1), ['-e', 'codex', 'login'], 'terminal command');
+    });
+
+    test('Account', 'signed out of Gemini: "Log in…" runs agy', async c => {
+        await c.show('loggedout', 'gemini');
+        c.expectText(/Log in to Antigravity to see your limits/);
+        await c.click(/^Log in…/, 'Gemini log in');
+        await waitFor(() => exists(`${SC}/terminal-last.args`), 'a terminal');
+        eq(terminalArgs().slice(1), ['-e', 'agy'], 'terminal command');
     });
 
     test('Account', '"Switch…" asks first: the first click warns and runs nothing', async c => {
@@ -478,6 +492,32 @@ function defineTests(ext) {
         const a = terminalArgs();
         ok(/"\$0" logout/.test(a[4]) && /"\$0" login/.test(a[4]), 'codex logout, then login');
         eq(a[5], 'codex', 'tool');
+    });
+
+    test('Account', 'the Gemini switch clears the keyring login first, then opens agy; stops if sign-out fails', async c => {
+        await c.show('healthy', 'gemini');
+        await c.click(/^Switch…/);
+        c.expectText(/Signs out Gemini \(Antigravity\) on this computer, then opens sign-in\./);
+        await c.click(/^Confirm$/);
+        await waitFor(() => exists(`${SC}/terminal-last.args`), 'a terminal');
+        const a = terminalArgs();
+        const script = a[4];
+        eq(a[5], 'agy', 'tool');
+        const binDir = `${HOME}/fake-gemini-switch`;
+        GLib.mkdir_with_parents(binDir, 0o755);
+        const calls = `${binDir}/calls`;
+        write(`${binDir}/secret-tool`, `#!/bin/sh\necho "secret-tool $*" >> ${calls}\n[ -f ${binDir}/fail ] && exit 1\nexit 0\n`);
+        write(`${binDir}/agy`, `#!/bin/sh\necho "agy $*" >> ${calls}\nexit 0\n`);
+        GLib.chmod(`${binDir}/secret-tool`, 0o755);
+        GLib.chmod(`${binDir}/agy`, 0o755);
+        write(calls, '');
+        let r = await runCommand(['env', `PATH=${binDir}:/usr/bin:/bin`, 'sh', '-c', script, `${binDir}/agy`]);
+        eq(readText(calls).trim().split('\n'), ['secret-tool clear service gemini username antigravity', 'agy'], 'commands run');
+        write(calls, '');
+        write(`${binDir}/fail`, '1');
+        r = await runCommand(['env', `PATH=${binDir}:/usr/bin:/bin`, 'sh', '-c', script, `${binDir}/agy`]);
+        eq(readText(calls).trim().split('\n'), ['secret-tool clear service gemini username antigravity'], 'stops when sign-out fails');
+        ok(/Sign-out failed/.test(r.out) && r.status !== 0, 'reports sign-out failure');
     });
 
     test('Account', 'the switch script, run against a fake tool: signs out then in; stops if sign-out fails', async c => {
@@ -580,6 +620,22 @@ function defineTests(ext) {
         await c.show('healthy', 'codex');
         c.expectText(/^24\.5M$/m); c.expectText(/^152\.0M$/m); c.expectText(/^1\.84B$/m);
         c.expectText(/whole account/);
+    });
+
+    test('Tokens', 'Gemini: today\'s total, output and share from cache', async c => {
+        await c.show('healthy', 'gemini');
+        c.expectText(/^45\.2M$/m); c.expectText(/^310\.0k$/m); c.expectText(/from cache/);
+        c.expectText(/this computer/);
+    });
+
+    test('Limits', 'Gemini: model group quota rings, AI credits and stale fallback', async c => {
+        await c.show('two', 'gemini');
+        c.expectText(/5-hour · Gemini/); c.expectText(/5-hour · Claude & GPT/);
+        c.expectText(/^22%$/m); c.expectText(/^5%$/m);
+        c.expectText(/^Credits$/m); c.expectText(/^500$/m);
+        await c.show('apierror', 'gemini');
+        c.expectText(/Saved numbers from \d\d:\d\d/);
+        c.expectText(/^18%$/m, 'saved Gemini quota');
     });
 
     test('Tokens', 'Codex slow: saved limits and totals stay, marked with their time', async c => {
@@ -728,6 +784,52 @@ function defineTests(ext) {
     test('Remote · Codex', 'restarts on the timeline, with the last one\'s time', async c => {
         await c.show('history', 'codex');
         c.expectText(/2 restarts today, last (\w{3} )?\d\d:\d\d/);
+    });
+
+    // ---------------- remote access: Gemini ----------------
+    test('Remote · Gemini', 'connected daemon with instance name, sessions and dashboard link', async c => {
+        await c.show('healthy', 'gemini');
+        c.expectText(/Connected · devbox-swift-falcon/);
+        c.expectText(/All 2 on Remote Control/);
+        c.expectText(/Remote access healthy/);
+        eq(c.model('gemini').level, 'ok', 'Gemini level');
+        const orig = Gio.AppInfo.launch_default_for_uri;
+        let opened = null;
+        Gio.AppInfo.launch_default_for_uri = uri => { opened = uri; return true; };
+        try {
+            await c.click(/Open dashboard in browser/);
+        } finally {
+            Gio.AppInfo.launch_default_for_uri = orig;
+        }
+        eq(opened, 'https://antigravity.google.com', 'opened dashboard link');
+    });
+
+    test('Remote · Gemini', 'local terminal sessions stay calm (no warning dot) with /remote-control hint', async c => {
+        await c.show(custom('gemini-local-sessions', 'healthy', d => {
+            d.gemini.workers.sessions = {total: 2, connected: 0};
+        }), 'gemini');
+        c.expectText(/2 open · \/remote-control to share/);
+        eq(c.model('gemini').level, 'ok', 'local sessions do not trigger a warning');
+    });
+
+    test('Remote · Gemini', 'daemon down offers one-click "Start daemon"; reconnecting offers two-step restart', async c => {
+        await c.show('apierror', 'gemini');
+        c.expectText(/Remote Control daemon not running/);
+        await c.click(/^Start daemon/);
+        await waitFor(() => /systemd-run --user --scope --quiet --collect -- \S*agy remote-control start/.test(actions()), 'the start daemon command');
+        clearActions();
+        await c.show('fixes', 'gemini');
+        const b = await c.click(/^Restart anyway/);
+        eq(b.label, 'Ends remote daemon sessions · click again', 'armed warning');
+        b.emit('clicked', 1);
+        await waitFor(() => /systemctl --user restart antigravity-cli-daemon\.service/.test(actions()), 'the restart daemon command');
+    });
+
+    test('Remote · Gemini', 'a link that is not https://antigravity.google.com is never offered on Gemini', async c => {
+        await c.show(custom('badlink-gemini', 'healthy', d => {
+            d.gemini.workers.daemon.link = 'https://claude.ai/code?environment=wrong';
+        }), 'gemini');
+        ok(!c.button(/Open dashboard in browser/), 'cross-host link shown');
     });
 
     // ---------------- fix buttons ----------------
@@ -880,6 +982,12 @@ function defineTests(ext) {
         c.expectText(/^7%$/m); c.expectText(/^11%$/m); c.expectText(/^500$/m);
         c.expectText(/^1\.0M$/m); c.expectText(/^28\.0M$/m); c.expectText(/^1\.84B$/m);
         c.expectText(/Phone link connected · my-laptop/);
+        c.tab('gemini'); await sleep(500);
+        c.expectText(/gemini-user@example\.com|user@example\.com/); c.expectText(/^Ultra$/m);
+        c.expectText(/Google login/);
+        c.expectText(/5-hour · Gemini/);
+        c.expectText(/from cache/);
+        c.expectText(/Connected/);
     });
 
     // ---------------- performance ----------------
@@ -897,14 +1005,14 @@ function defineTests(ext) {
     test('Performance', 'switching tabs takes under 40 ms', async c => {
         await c.show('history');
         const times = [];
-        for (const k of ['codex', 'claude', 'codex', 'claude']) {
+        for (const k of ['codex', 'gemini', 'claude', 'gemini', 'codex', 'claude']) {
             const t0 = GLib.get_monotonic_time();
             c.tab(k);
             times.push((GLib.get_monotonic_time() - t0) / 1000);
             await sleep(400);
         }
         log('tab ms', times.map(x => x.toFixed(1)).join(' '));
-        ok(Math.max(...times) < 40, `slowest switch ${Math.max(...times).toFixed(1)} ms`);
+        ok(Math.max(...times) < 40, `slowest switch ${Math.max(...times) .toFixed(1)} ms`);
     });
 
     // ---------------- lifecycle (last: these replace the indicator) ----------------
