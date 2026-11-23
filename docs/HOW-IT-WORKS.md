@@ -119,7 +119,7 @@ The widget is a GNOME Shell extension, and GNOME runs at most one copy of an ext
 | Codex account, limits, tokens, relay | the Codex background service's control socket, `~/.codex/app-server-control/app-server-control.sock` (JSON-RPC `account/read`, `account/rateLimits/read`, `account/usage/read`, `remoteControl/status/read`) |
 | Codex watchdog | `codex-remote-control.service` / `.timer`, its journal, and its note of which other Codex app holds the phone link (`$XDG_RUNTIME_DIR/codex-remote-control-watchdog.held`) |
 | SSH (for the Codex desktop app) | `sshd.service` |
-| Gemini account, plan, limits, credits | Antigravity login in the session keyring (`secret-tool lookup service gemini username antigravity`, or `~/.gemini/antigravity-cli/settings.json` API-key mode) + Code Assist `loadCodeAssist` and `retrieveUserQuota` (same endpoints `agy`'s `/usage` calls; can be turned off with `"gemini_live_limits": false` in `~/.config/ai-tracker/config.json`) |
+| Gemini account, plan, limits, credits | Antigravity login in the session keyring (`secret-tool lookup service gemini username antigravity`, or `~/.gemini/antigravity-cli/settings.json` API-key mode) + Code Assist `loadCodeAssist` and `retrieveUserQuotaSummary` (with `retrieveUserQuota` fallback — same endpoints `agy`'s `/usage` calls for both 5-hour and weekly Gemini and Claude & GPT windows; can be turned off with `"gemini_live_limits": false` in `~/.config/ai-tracker/config.json`) |
 | Gemini tokens today | transcripts under `~/.gemini/antigravity-cli/brain/**/.system_generated/logs/transcript.jsonl`, scanned incrementally |
 | Gemini remote daemon & sessions | `antigravity-cli-daemon.service` and its journal (`agy remote-control`), plus running interactive `agy` terminal sessions in `/proc` |
 

@@ -986,6 +986,9 @@ function defineTests(ext) {
         c.expectText(/gemini-user@example\.com|user@example\.com/); c.expectText(/^Ultra$/m);
         c.expectText(/Google login/);
         c.expectText(/5-hour · Gemini/);
+        c.expectText(/Weekly · Gemini/);
+        c.expectText(/5-hour · Claude & GPT/);
+        c.expectText(/Weekly · Claude & GPT/);
         c.expectText(/from cache/);
         c.expectText(/Connected/);
     });

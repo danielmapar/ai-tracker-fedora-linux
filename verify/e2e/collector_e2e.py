@@ -3,7 +3,7 @@
 Each test runs it in a throwaway HOME with made-up data:
   - Claude Code files: login, account, settings, terminal sessions and today's transcripts;
   - Gemini (Antigravity) files: settings, today's brain transcripts, fake `secret-tool` keyring and
-    a local loopback HTTP server mocking Cloud Code `loadCodeAssist` + `retrieveUserQuota`;
+    a local loopback HTTP server mocking Cloud Code `loadCodeAssist`, `retrieveUserQuotaSummary`, and `retrieveUserQuota`;
   - fake `systemctl` / `journalctl` answering from fixture files and recording every call;
   - a fake Codex background service on the real control-socket path (fake_codex.py), and a fake
     `codex` for the private fallback;
@@ -27,6 +27,7 @@ TOKEN = "fake-access-token-must-never-leak"
 REFRESH = "fake-refresh-token-must-never-leak"
 GEMINI_TOKEN = "fake-gemini-access-token-must-never-leak"
 GEMINI_REFRESH = "fake-gemini-refresh-token-must-never-leak"
+GEMINI_UA = "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)"
 NOW = int(time.time())
 MIDNIGHT = int(time.mktime(time.localtime(NOW)[:3] + (0, 0, 0, 0, 0, -1)))
 SLEEPER = None
@@ -112,7 +113,7 @@ class Sandbox:
                 ua = self.headers.get("User-Agent", "")
                 auth = self.headers.get("Authorization", "")
                 sb.gemini_reqs.append({"path": self.path, "ua": ua, "auth": auth, "body": body})
-                if ua != "antigravity/1.5":
+                if ua != GEMINI_UA:
                     self.send_response(403)
                     self.end_headers()
                     return
@@ -128,8 +129,15 @@ class Sandbox:
                     self.send_response(status)
                     self.end_headers()
                     return
+                path_status = sb.gemini_cfg.get("path_status", {}).get(self.path, 200)
+                if path_status != 200:
+                    if not (path_status == 400 and "project" in body and sb.gemini_cfg.get("accept_project_retry")):
+                        self.send_response(path_status)
+                        self.end_headers()
+                        return
                 if self.path == "/v1internal:loadCodeAssist":
                     resp = sb.gemini_cfg.get("loadCodeAssist") or {
+                        "cloudaicompanionProject": "proj-fake-1",
                         "currentTier": {"id": "standard-tier", "name": "Gemini Code Assist"},
                         "paidTier": {
                             "id": "g1-ultra-tier",
@@ -137,6 +145,29 @@ class Sandbox:
                             "availableCredits": [{"creditType": "GOOGLE_ONE_AI", "creditAmount": "500"}],
                         },
                     }
+                elif self.path == "/v1internal:retrieveUserQuotaSummary":
+                    resp = (
+                        sb.gemini_cfg["retrieveUserQuotaSummary"]
+                        if "retrieveUserQuotaSummary" in sb.gemini_cfg
+                        else {
+                            "groups": [
+                                {
+                                    "displayName": "Gemini Models",
+                                    "buckets": [
+                                        {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.54, "resetTime": iso(NOW + 5 * 86400)},
+                                        {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.78, "resetTime": iso(NOW + 7200)},
+                                    ],
+                                },
+                                {
+                                    "displayName": "Claude and GPT models",
+                                    "buckets": [
+                                        {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.30, "resetTime": iso(NOW + 6 * 86400)},
+                                        {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.65, "resetTime": iso(NOW + 5400)},
+                                    ],
+                                },
+                            ]
+                        }
+                    )
                 elif self.path == "/v1internal:retrieveUserQuota":
                     resp = sb.gemini_cfg.get("retrieveUserQuota") or {
                         "buckets": [
@@ -427,7 +458,7 @@ def _(sb):
     assert frames[0]["pending"], "first frame lists no loading parts"
     eq(frames[-1]["pending"], [], "last frame's pending")
     eq(frames[-1]["gemini"]["account"]["plan"], "ultra", "healthy gemini plan in stream")
-    eq(len(frames[-1]["gemini"]["usage"]["windows"]), 2, "healthy gemini windows in stream")
+    eq(len(frames[-1]["gemini"]["usage"]["windows"]), 4, "healthy gemini windows in stream")
     assert frames[-1]["gemini"]["workers"]["sessions"]["connected"] >= 1, frames[-1]["gemini"]["workers"]["sessions"]
     for a, b in zip(frames, frames[1:]):
         assert set(b["pending"]) <= set(a["pending"]), "a part went back to loading"
@@ -594,18 +625,66 @@ def _(sb):
     eq(last(sb.collect()[0])["codex"]["workers"]["watchdog"]["relay_held_by"], None, "stale note")
 
 
-@test("Gemini account, quota windows and G1 credits via keyring + Cloud Code API")
+@test("Gemini account, 5-hour + weekly quota windows and G1 credits via retrieveUserQuotaSummary")
 def _(sb):
     g = last(sb.collect()[0])["gemini"]
     eq((g["account"]["logged_in"], g["account"]["email"], g["account"]["plan"], g["account"]["auth_method"]),
        (True, "gemini-user@example.com", "ultra", "google"), "gemini account")
     eq([(w["label"], w["pct"], w["resets_at"]) for w in g["usage"]["windows"]],
-       [("5-hour · Gemini", 22.0, NOW + 7200), ("5-hour · Claude & GPT", 35.0, NOW + 5400)],
+       [
+           ("5-hour · Gemini", 22.0, NOW + 7200),
+           ("Weekly · Gemini", 46.0, NOW + 5 * 86400),
+           ("5-hour · Claude & GPT", 35.0, NOW + 5400),
+           ("Weekly · Claude & GPT", 70.0, NOW + 6 * 86400),
+       ],
        "gemini windows")
     eq(g["usage"]["credits"], 500, "gemini credits")
     paths = {r["path"] for r in sb.gemini_reqs}
-    eq(paths, {"/v1internal:loadCodeAssist", "/v1internal:retrieveUserQuota"}, "Cloud Code endpoints called")
-    assert all(r["ua"] == "antigravity/1.5" for r in sb.gemini_reqs), sb.gemini_reqs
+    eq(paths, {"/v1internal:loadCodeAssist", "/v1internal:retrieveUserQuotaSummary"}, "Cloud Code endpoints called")
+    assert all(r["ua"] == GEMINI_UA for r in sb.gemini_reqs), sb.gemini_reqs
+
+
+@test("Gemini quota summary: 400 project retry, 403/404/empty fallbacks, and global 403 short-circuit")
+def _(sb):
+    # 1) 400 on summary retries once with loadCodeAssist project ID
+    sb.gemini_cfg["path_status"] = {"/v1internal:retrieveUserQuotaSummary": 400}
+    sb.gemini_cfg["accept_project_retry"] = True
+    g = last(sb.collect()[0])["gemini"]
+    eq(len(g["usage"]["windows"]), 4, "summary retry with project succeeded")
+    summary_bodies = [json.loads(r["body"]) for r in sb.gemini_reqs if r["path"] == "/v1internal:retrieveUserQuotaSummary"]
+    eq(summary_bodies, [{}, {"project": "proj-fake-1"}], "summary retried with loadCodeAssist project")
+
+    # 2) 403 and 404 on summary (with healthy loadCodeAssist) fall back to retrieveUserQuota
+    sb.gemini_cfg["accept_project_retry"] = False
+    for code in (403, 404):
+        sb.gemini_reqs.clear()
+        sb.gemini_cfg["path_status"] = {"/v1internal:retrieveUserQuotaSummary": code}
+        g_fb = last(sb.collect()[0])["gemini"]
+        eq([(w["label"], w["pct"]) for w in g_fb["usage"]["windows"]],
+           [("5-hour · Gemini", 22.0), ("5-hour · Claude & GPT", 35.0)],
+           f"fallback retrieveUserQuota windows on {code}")
+        assert "/v1internal:retrieveUserQuota" in [r["path"] for r in sb.gemini_reqs], sb.gemini_reqs
+
+    # 3) Empty 200 {} summary falls back to retrieveUserQuota, and surfaces transient fallback errors
+    sb.gemini_reqs.clear()
+    sb.gemini_cfg["path_status"] = {}
+    sb.gemini_cfg["retrieveUserQuotaSummary"] = {}
+    g_empty = last(sb.collect()[0])["gemini"]
+    eq([(w["label"], w["pct"]) for w in g_empty["usage"]["windows"]],
+       [("5-hour · Gemini", 22.0), ("5-hour · Claude & GPT", 35.0)],
+       "empty summary falls back to retrieveUserQuota")
+    sb.gemini_cfg["path_status"] = {"/v1internal:retrieveUserQuota": 503}
+    g_err = last(sb.collect()[0])["gemini"]
+    assert "HTTP 503" in g_err["usage"].get("error", ""), g_err["usage"]
+    eq(len(g_err["usage"]["stale"]["windows"]), 2, "stale cache preserved on empty-summary fallback 503")
+
+    # 4) Global 403 (loadCodeAssist + summary both rejected) short-circuits without calling retrieveUserQuota
+    sb.gemini_reqs.clear()
+    sb.gemini_cfg.clear()
+    sb.gemini_cfg["status"] = 403
+    g_403 = last(sb.collect()[0])["gemini"]
+    assert "rejected" in g_403["usage"].get("error", ""), g_403["usage"]
+    assert "/v1internal:retrieveUserQuota" not in [r["path"] for r in sb.gemini_reqs], sb.gemini_reqs
 
 
 @test("Gemini API key mode: logged in as apikey, empty windows, no keyring or Cloud Code calls")
@@ -625,7 +704,7 @@ def _(sb):
     g429 = last(sb.collect()[0])["gemini"]
     assert "rate-limiting" in g429["usage"].get("error", ""), g429["usage"]
     eq(g429["usage"]["stale"]["credits"], 500, "stale credits on 429")
-    eq(len(g429["usage"]["stale"]["windows"]), 2, "stale windows on 429")
+    eq(len(g429["usage"]["stale"]["windows"]), 4, "stale windows on 429")
     eq(g429["account"]["plan"], "ultra", "account plan preserved on 429")
 
     os.unlink(sb.path(".cache/agent-usage/last-snapshot.json"))

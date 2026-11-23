@@ -977,9 +977,8 @@ fn gemini_windows(ruq: &Value, now_secs: i64) -> Vec<Value> {
         if mid.starts_with("tab_") {
             continue;
         }
-        let Some(rem) = b["remainingFraction"].as_f64().filter(|x| x.is_finite()) else { continue };
-        let used_pct = ((1.0 - rem.clamp(0.0, 1.0)) * 1000.0).round() / 10.0;
         let resets_at = b["resetTime"].as_str().and_then(parse_iso);
+        let Some(used_pct) = gemini_bucket_used_pct(b, resets_at) else { continue };
         if resets_at.is_none() && used_pct == 0.0 {
             continue;
         }
@@ -1047,6 +1046,202 @@ fn gemini_windows(ruq: &Value, now_secs: i64) -> Vec<Value> {
     out
 }
 
+/// Versioned Antigravity User-Agent required by `retrieveUserQuotaSummary` to include first-party
+/// Gemini buckets. If Google raises the minimum client version, update this string or first-party
+/// Gemini buckets may be omitted by the summary endpoint.
+const GEMINI_USER_AGENT: &str = "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)";
+
+enum GeminiHttpErr {
+    Status(u16),
+    Network,
+    BadJson,
+}
+
+fn gemini_post(url: &str, auth: &str, body: Value, deadline: Instant) -> Result<Value, GeminiHttpErr> {
+    let rem = deadline.saturating_duration_since(Instant::now());
+    if rem.is_zero() {
+        return Err(GeminiHttpErr::Network);
+    }
+    match ureq::post(url)
+        .set("Authorization", auth)
+        .set("Content-Type", "application/json")
+        .set("User-Agent", GEMINI_USER_AGENT)
+        .timeout(rem.min(Duration::from_secs(8)))
+        .send_json(body)
+    {
+        Ok(r) => r.into_json().map_err(|_| GeminiHttpErr::BadJson),
+        Err(ureq::Error::Status(code, _)) => Err(GeminiHttpErr::Status(code)),
+        Err(_) => Err(GeminiHttpErr::Network),
+    }
+}
+
+fn gemini_http_error(err: GeminiHttpErr) -> Value {
+    let msg = match err {
+        GeminiHttpErr::Status(401 | 403) => "Login token rejected. Use any Antigravity session and it renews.".into(),
+        GeminiHttpErr::Status(429) => "Google is rate-limiting quota checks. Try Refresh again in a minute.".into(),
+        GeminiHttpErr::Status(code) => format!("Quota endpoint returned HTTP {code}"),
+        GeminiHttpErr::BadJson => "Unreadable quota response".into(),
+        GeminiHttpErr::Network => "Could not reach Google Cloud Code (offline?)".into(),
+    };
+    json!({ "error": msg })
+}
+
+fn gemini_project_id(lca: &Value) -> Option<&str> {
+    let p = &lca["cloudaicompanionProject"];
+    p.as_str()
+        .or_else(|| p["id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn has_token(s: &str, needles: &[&str]) -> bool {
+    s.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| !tok.is_empty() && needles.iter().any(|n| tok.eq_ignore_ascii_case(n)))
+}
+
+fn match_window_cadence(s: &str) -> Option<bool> {
+    let tokens: Vec<String> = s
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let has = |t: &str| tokens.iter().any(|x| x == t);
+    let has_pair = |a: &str, b: &str| tokens.windows(2).any(|w| w[0] == a && w[1] == b);
+    if has("5h") || has_pair("five", "hour") || has_pair("5", "hour") {
+        Some(false)
+    } else if has("weekly") || has("168h") || has("7d") || has_pair("seven", "day") || has_pair("7", "day") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn summary_bucket_is_cg(bid: &str, group_hint: &str) -> Option<bool> {
+    const CG: &[&str] = &["3p", "claude", "gpt", "third", "thirdparty"];
+    if has_token(bid, CG) {
+        Some(true)
+    } else if has_token(bid, &["gemini"]) {
+        Some(false)
+    } else if has_token(group_hint, CG) {
+        Some(true)
+    } else if has_token(group_hint, &["gemini"]) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn summary_bucket_is_weekly(b: &Value, bid: &str, resets_at: Option<i64>, now_secs: i64) -> Option<bool> {
+    if let Some(w) = b["window"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(is_wk) = match_window_cadence(w) {
+            return Some(is_wk);
+        }
+        // Explicit cadences like "daily" or "monthly" shouldn't silently merge into Weekly.
+        if !has_token(w, &["unspecified", "unknown"]) {
+            return None;
+        }
+    }
+    match_window_cadence(bid)
+        .or_else(|| b["displayName"].as_str().and_then(match_window_cadence))
+        .or_else(|| resets_at.map(|r| r - now_secs > 6 * 3600))
+}
+
+fn gemini_bucket_used_pct(b: &Value, resets_at: Option<i64>) -> Option<f64> {
+    if let Some(rem) = b["remainingFraction"].as_f64().filter(|x| x.is_finite()) {
+        return Some(((1.0 - rem.clamp(0.0, 1.0)) * 1000.0).round() / 10.0);
+    }
+    // Proto3 JSON omits zero-valued `remainingFraction` when a bucket is exhausted (0% left).
+    let positive_remaining = b["remainingAmount"]
+        .as_str()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .or_else(|| b["remainingAmount"].as_f64())
+        .is_some_and(|n| n.is_finite() && n > 0.0);
+    if resets_at.is_some() && !positive_remaining {
+        return Some(100.0);
+    }
+    None
+}
+
+/// Untouched summary buckets (`remainingFraction == 1.0`, no description) report a rolling
+/// full-window `resetTime` (`now + 5h` or `now + 7d`). Drop it so the UI shows "Window not started".
+fn summary_reset_time(b: &Value, weekly: bool, resets_at: Option<i64>, requested_at: i64) -> Option<i64> {
+    let r = resets_at?;
+    let no_description = b["description"].as_str().is_none_or(|s| s.trim().is_empty());
+    let span = if weekly { 7 * 86_400 } else { 5 * 3600 };
+    let untouched = b["remainingFraction"].as_f64() == Some(1.0)
+        && no_description
+        && (r - requested_at - span).abs() <= 60;
+    if untouched { None } else { Some(r) }
+}
+
+/// Parse `v1internal:retrieveUserQuotaSummary`, which exposes both 5-hour and weekly buckets
+/// per model group (Gemini vs. Claude & GPT). Emits each group's 5-hour then weekly ring so a
+/// 4-window plan forms a clean 2x2 grid (row 1: Gemini, row 2: Claude & GPT).
+fn gemini_summary_windows(summary: &Value, requested_at: i64) -> Vec<Value> {
+    let mut gem_5h: Option<WinAgg> = None;
+    let mut gem_wk: Option<WinAgg> = None;
+    let mut cg_5h: Option<WinAgg> = None;
+    let mut cg_wk: Option<WinAgg> = None;
+
+    let mut visit = |group_hint: &str, b: &Value| {
+        if b["disabled"].as_bool() == Some(true) {
+            return;
+        }
+        let bid = b["bucketId"].as_str().unwrap_or("");
+        if bid.to_ascii_lowercase().starts_with("tab_") {
+            return;
+        }
+        let Some(is_cg) = summary_bucket_is_cg(bid, group_hint) else { return };
+        let raw_reset = b["resetTime"].as_str().and_then(parse_iso);
+        let Some(pct) = gemini_bucket_used_pct(b, raw_reset) else { return };
+        let Some(weekly) = summary_bucket_is_weekly(b, bid, raw_reset, requested_at) else { return };
+        let resets_at = summary_reset_time(b, weekly, raw_reset, requested_at);
+        let slot = match (is_cg, weekly) {
+            (false, false) => &mut gem_5h,
+            (false, true) => &mut gem_wk,
+            (true, false) => &mut cg_5h,
+            (true, true) => &mut cg_wk,
+        };
+        WinAgg::add(slot, pct, resets_at);
+    };
+
+    if let Some(groups) = summary["groups"]
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .or_else(|| summary["quotaGroups"].as_array().filter(|a| !a.is_empty()))
+    {
+        for g in groups {
+            let hint = format!(
+                "{} {}",
+                g["modelGroup"].as_str().unwrap_or(""),
+                g["displayName"].as_str().unwrap_or(""),
+            );
+            for b in g["buckets"].as_array().into_iter().flatten() {
+                visit(&hint, b);
+            }
+        }
+    } else if let Some(buckets) = summary["buckets"].as_array() {
+        for b in buckets {
+            visit("", b);
+        }
+    }
+
+    let has_cg = cg_5h.is_some() || cg_wk.is_some();
+    let mut out = Vec::new();
+    for (span, slot) in [("5-hour", gem_5h), ("Weekly", gem_wk)] {
+        if let Some(w) = slot {
+            let label = if has_cg { format!("{span} · Gemini") } else { span.to_string() };
+            out.push(json!({ "label": label, "pct": w.pct, "resets_at": w.resets_at }));
+        }
+    }
+    for (span, slot) in [("5-hour", cg_5h), ("Weekly", cg_wk)] {
+        if let Some(w) = slot {
+            out.push(json!({ "label": format!("{span} · Claude & GPT"), "pct": w.pct, "resets_at": w.resets_at }));
+        }
+    }
+    out
+}
+
 fn gemini_usage(creds: &GeminiCreds, live: bool) -> Value {
     if matches!(creds, GeminiCreds::ApiKey) {
         return json!({ "windows": [], "credits": Value::Null });
@@ -1074,52 +1269,79 @@ fn gemini_usage_live(creds: &GeminiCreds) -> Value {
     }
     let base = gemini_base_url();
     let auth = format!("Bearer {token}");
-    let (lca_res, ruq_res) = thread::scope(|s| {
+    let summary_url = format!("{base}/v1internal:retrieveUserQuotaSummary");
+    let deadline = Instant::now() + TIMEOUT;
+    let mut requested_at = now();
+    let (lca_res, sum_res) = thread::scope(|s| {
         let lca = s.spawn(|| {
-            ureq::post(&format!("{base}/v1internal:loadCodeAssist"))
-                .set("Authorization", &auth)
-                .set("Content-Type", "application/json")
-                .set("User-Agent", "antigravity/1.5")
-                .timeout(Duration::from_secs(8))
-                .send_json(json!({
+            gemini_post(
+                &format!("{base}/v1internal:loadCodeAssist"),
+                &auth,
+                json!({
                     "metadata": {
                         "ideType": "IDE_UNSPECIFIED",
                         "platform": "PLATFORM_UNSPECIFIED",
                         "pluginType": "GEMINI",
                     }
-                }))
+                }),
+                deadline,
+            )
         });
-        let ruq = ureq::post(&format!("{base}/v1internal:retrieveUserQuota"))
-            .set("Authorization", &auth)
-            .set("Content-Type", "application/json")
-            .set("User-Agent", "antigravity/1.5")
-            .timeout(Duration::from_secs(8))
-            .send_json(json!({}));
-        (lca.join().ok(), ruq)
+        let sum = gemini_post(&summary_url, &auth, json!({}), deadline);
+        (lca.join().ok(), sum)
     });
     trace("gemini usage: responses");
 
-    let ruq: Value = match ruq_res {
-        Ok(r) => match r.into_json() {
-            Ok(v) => v,
-            Err(_) => return json!({ "error": "Unreadable quota response" }),
-        },
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
-            return json!({ "error": "Login token rejected. Use any Antigravity session and it renews." });
+    let lca = lca_res.as_ref().and_then(|r| r.as_ref().ok());
+    let lca_auth_rejected = matches!(lca_res, Some(Err(GeminiHttpErr::Status(401 | 403))));
+    let project = lca.and_then(gemini_project_id);
+
+    // Some accounts/backends require `project` in the retrieveUserQuotaSummary body.
+    let sum_res = match (sum_res, project) {
+        (Err(GeminiHttpErr::Status(400)), Some(p)) => {
+            trace("gemini usage: summary 400 retry with project");
+            requested_at = now();
+            gemini_post(&summary_url, &auth, json!({ "project": p }), deadline)
         }
-        Err(ureq::Error::Status(429, _)) => {
-            return json!({ "error": "Google is rate-limiting quota checks. Try Refresh again in a minute." });
-        }
-        Err(ureq::Error::Status(code, _)) => {
-            return json!({ "error": format!("Quota endpoint returned HTTP {code}") });
-        }
-        Err(_) => return json!({ "error": "Could not reach Google Cloud Code (offline?)" }),
+        (other, _) => other,
     };
 
-    let lca: Option<Value> = lca_res.and_then(|r| r.ok()).and_then(|r| r.into_json().ok());
-    let plan = lca.as_ref().and_then(gemini_plan);
-    let credits = lca.as_ref().map(gemini_credits).unwrap_or(Value::Null);
-    let windows = gemini_windows(&ruq, now());
+    let fetch_fallback = || {
+        trace("gemini usage: fallback retrieveUserQuota");
+        let body = project.map(|p| json!({ "project": p })).unwrap_or_else(|| json!({}));
+        gemini_post(&format!("{base}/v1internal:retrieveUserQuota"), &auth, body, deadline)
+            .map(|ruq| gemini_windows(&ruq, now()))
+    };
+
+    let windows = match sum_res {
+        Ok(sum) => {
+            let w = gemini_summary_windows(&sum, requested_at);
+            if !w.is_empty() {
+                w
+            } else {
+                match fetch_fallback() {
+                    Ok(fb) => fb,
+                    Err(err @ (GeminiHttpErr::Status(401 | 429 | 500..=599) | GeminiHttpErr::Network)) => {
+                        return gemini_http_error(err);
+                    }
+                    Err(_) => w,
+                }
+            }
+        }
+        Err(err @ (GeminiHttpErr::Status(401 | 429) | GeminiHttpErr::Network)) => {
+            return gemini_http_error(err);
+        }
+        Err(GeminiHttpErr::Status(403)) if lca_auth_rejected => {
+            return gemini_http_error(GeminiHttpErr::Status(403));
+        }
+        Err(_) => match fetch_fallback() {
+            Ok(fb) => fb,
+            Err(err) => return gemini_http_error(err),
+        },
+    };
+
+    let plan = lca.and_then(gemini_plan);
+    let credits = lca.map(gemini_credits).unwrap_or(Value::Null);
     json!({
         "windows": windows,
         "credits": credits,
@@ -2139,6 +2361,107 @@ mod tests {
         assert_eq!(w2[0]["resets_at"], parse_iso(t_2h).unwrap()); // earliest reset in Pro group
         assert_eq!(w2[1]["pct"], 10.0);
         assert_eq!(w2[2]["pct"], 20.0);
+    }
+
+    #[test]
+    fn gemini_summary_windows_both_groups_and_edge_cases() {
+        let base = parse_iso("2026-11-22T12:00:00Z").unwrap();
+        let t_2h = "2026-11-22T14:00:00Z";
+        let t_3h = "2026-11-22T15:00:00Z";
+        let t_5h = "2026-11-22T17:00:02Z"; // untouched rolling 5h reset (within ±60s)
+        let t_1d = "2026-11-23T12:00:00Z";
+        let t_5d = "2026-11-27T12:00:00Z";
+        let t_7d = "2026-11-29T11:59:58Z"; // untouched rolling 7d reset (within ±60s)
+
+        // 1) Full 4-window Ultra summary: grouped by family, 5-hour before Weekly
+        let full = json!({
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        { "bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.541, "resetTime": t_5d },
+                        { "bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.903, "resetTime": t_3h },
+                        { "bucketId": "gemini-disabled", "window": "5h", "remainingFraction": 0.0, "disabled": true, "resetTime": t_3h }
+                    ]
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        { "bucketId": "3p-weekly", "window": "weekly", "resetTime": t_5d }, // proto3 zero-omitted -> 100%
+                        { "bucketId": "3p-5h", "window": "5h", "remainingFraction": 1.0, "description": "", "resetTime": t_5h }
+                    ]
+                }
+            ]
+        });
+        let w = gemini_summary_windows(&full, base);
+        let labels: Vec<_> = w.iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(
+            labels,
+            ["5-hour · Gemini", "Weekly · Gemini", "5-hour · Claude & GPT", "Weekly · Claude & GPT"]
+        );
+        assert_eq!(w[0]["pct"], 9.7);
+        assert_eq!(w[0]["resets_at"], parse_iso(t_3h).unwrap());
+        assert_eq!(w[1]["pct"], 45.9);
+        assert_eq!(w[1]["resets_at"], parse_iso(t_5d).unwrap());
+        assert_eq!(w[2]["pct"], 0.0);
+        assert!(w[2]["resets_at"].is_null()); // untouched rolling 5h reset cleared (even with description: "")
+        assert_eq!(w[3]["pct"], 100.0); // omitted remainingFraction with resetTime -> exhausted
+        assert_eq!(w[3]["resets_at"], parse_iso(t_5d).unwrap());
+
+        // 2) Empty `groups: []` falls back to `quotaGroups`; "Gemini 3Pro" isn't hijacked by "3p";
+        //    multi-bucket slot merges max pct + earliest reset; explicit "daily" cadence is ignored
+        let quota_groups = json!({
+            "groups": [],
+            "quotaGroups": [
+                {
+                    "modelGroup": "MODEL_GROUP_GEMINI_3PRO",
+                    "displayName": "Gemini 3Pro",
+                    "buckets": [
+                        { "bucketId": "b1", "window": "QUOTA_WINDOW_FIVE_HOUR", "remainingFraction": 0.80, "resetTime": t_3h },
+                        { "bucketId": "b2", "window": "5-hour", "remainingFraction": 0.60, "resetTime": t_2h },
+                        { "bucketId": "b3", "window": "daily", "remainingFraction": 0.10, "resetTime": t_1d }
+                    ]
+                },
+                {
+                    "displayName": "Claude and GPT",
+                    "buckets": [
+                        // Omitted remainingFraction but positive remainingAmount -> skipped (not 100%)
+                        { "bucketId": "3p-weekly", "window": "weekly", "remainingAmount": "50", "resetTime": t_5d },
+                        // Untouched 1.0 with non-empty description -> keeps resetTime
+                        { "bucketId": "3p-5h", "window": "5h", "remainingFraction": 1.0, "description": "Active window", "resetTime": t_5h }
+                    ]
+                }
+            ]
+        });
+        let wq = gemini_summary_windows(&quota_groups, base);
+        let labelsq: Vec<_> = wq.iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labelsq, ["5-hour · Gemini", "5-hour · Claude & GPT"]);
+        assert_eq!(wq[0]["pct"], 40.0); // max(20%, 40%)
+        assert_eq!(wq[0]["resets_at"], parse_iso(t_2h).unwrap()); // earliest(t_3h, t_2h)
+        assert_eq!(wq[1]["pct"], 0.0);
+        assert_eq!(wq[1]["resets_at"], parse_iso(t_5h).unwrap()); // description kept rolling reset
+
+        // 3) Top-level Gemini-only buckets: prefixed IDs, omits " · Gemini", clears null-description 7d reset,
+        //    preserves non-rolling 1.0 resetTime, skips tab_*
+        let gem_only = json!({
+            "buckets": [
+                { "bucketId": "antigravity_gemini_weekly", "window": "WEEKLY", "remainingFraction": 1.0, "description": null, "resetTime": t_7d },
+                { "bucketId": "antigravity_gemini_5h", "window": "QUOTA_WINDOW_UNSPECIFIED", "remainingFraction": 1.0, "resetTime": t_3h },
+                { "bucketId": "tab_autocomplete", "window": "5h", "remainingFraction": 0.1, "resetTime": t_3h }
+            ]
+        });
+        let w2 = gemini_summary_windows(&gem_only, base);
+        let labels2: Vec<_> = w2.iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labels2, ["5-hour", "Weekly"]);
+        assert_eq!(w2[0]["pct"], 0.0);
+        assert_eq!(w2[0]["resets_at"], parse_iso(t_3h).unwrap()); // not near now+5h, kept
+        assert_eq!(w2[1]["pct"], 0.0);
+        assert!(w2[1]["resets_at"].is_null()); // rolling now+7d with null description cleared
+
+        // 4) Project ID extraction handles both string and { id } object shapes
+        assert_eq!(gemini_project_id(&json!({ "cloudaicompanionProject": "proj-a" })), Some("proj-a"));
+        assert_eq!(gemini_project_id(&json!({ "cloudaicompanionProject": { "id": "proj-b" } })), Some("proj-b"));
+        assert_eq!(gemini_project_id(&json!({ "cloudaicompanionProject": "  " })), None);
     }
 
     #[test]
