@@ -197,6 +197,7 @@
 .au-codex .au-bar { -au-ring-from: #44e3c9; -au-ring-to: #6a6ff5; }
 .au-gemini .au-ring,
 .au-gemini .au-bar { -au-ring-from: #7ab8ff; -au-ring-to: #b37aff; }
+.au-pool-partner .au-ring { -au-ring-from: #ffc09f; -au-ring-to: #e0663c; }
 .au-root .au-ring.au-level-warn,
 .au-root .au-bar.au-level-warn { -au-ring-from: #ffe49a; -au-ring-to: #f39c26; }
 .au-root .au-ring.au-level-bad,
@@ -217,6 +218,9 @@
 .au-ring-stack.au-level-bad .au-ring-pct { color: #ffa0a0; }
 
 .au-gauge-hero { spacing: 18px; padding: 0 2px; }
+.au-gauge-hero-sm { spacing: 14px; padding: 2px 2px; }
+.au-gauge-hero-sm .au-gauge-label { font-size: 0.94em; }
+.au-gauge-hero-sm .au-gauge-reset { font-size: 0.88em; }
 .au-gauge-info { spacing: 3px; }
 .au-gauge-title { spacing: 8px; }
 .au-gauge-label { font-size: 1.05em; font-weight: 800; }
@@ -233,6 +237,42 @@
 .au-gauge-pace-sm { font-size: 0.74em; font-weight: 700; }
 .au-gauge-pace-sm.au-level-warn { color: #f6c453; }
 .au-gauge-pace-sm.au-level-bad { color: #ff8f8f; }
+
+/* model-pool groups inside the Gemini Plan limits card (Gemini vs. Claude & GPT) */
+.au-card.au-limits-grouped { spacing: 9px; padding: 10px; }
+.au-limits-grouped .au-extra { padding: 2px 4px 0 4px; }
+.au-pool-group {
+  spacing: 9px;
+  padding: 9px 10px 11px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background-color: rgba(255, 255, 255, 0.03);
+}
+.au-pool-gemini {
+  border-color: rgba(122, 184, 255, 0.22);
+  background-color: rgba(94, 160, 255, 0.07);
+}
+.au-pool-partner {
+  border-color: rgba(238, 144, 103, 0.24);
+  background-color: rgba(232, 132, 95, 0.075);
+}
+.au-pool-head {
+  spacing: 6px;
+  padding: 0 2px 6px 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.au-pool-gemini .au-pool-head { border-bottom-color: rgba(122, 184, 255, 0.14); }
+.au-pool-partner .au-pool-head { border-bottom-color: rgba(238, 144, 103, 0.16); }
+.au-pool-icons { spacing: 4px; }
+.au-pool-icon { icon-size: 0.98em; }
+.au-pool-icon-gemini { color: #8cbeff; }
+.au-pool-icon-claude { color: #ffb694; }
+.au-pool-icon-codex { color: #4fe0cc; }
+.au-pool-title { font-size: 0.84em; font-weight: 800; }
+.au-pool-gemini .au-pool-title { color: #dcebff; }
+.au-pool-partner .au-pool-title { color: #ffe2d4; }
+.au-pool-sub { font-size: 0.72em; font-weight: 600; color: rgba(255, 255, 255, 0.48); }
+.au-pool-group .au-gauge-label-sm { padding-top: 3px; }
 
 .au-tag { font-size: 0.7em; font-weight: 800; padding: 1px 7px; border-radius: 999px; }
 .au-tag.au-level-warn { color: #ffd88a; background-color: rgba(246, 196, 83, 0.18); }

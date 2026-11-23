@@ -98,6 +98,7 @@ const TABS = [
         switchWarning: 'Signs out Gemini (Antigravity) on this computer, then opens sign-in.',
     },
 ];
+const TAB_BY_KEY = Object.fromEntries(TABS.map(t => [t.key, t]));
 const PANEL_ICON = {
     iconFile: 'agent-usage-symbolic.svg',
     fallbackIcons: ['org.gnome.SystemMonitor-symbolic', 'power-profile-performance-symbolic'],
@@ -240,6 +241,47 @@ const LEVELS = ['ok', 'warn', 'bad', 'idle'];
 const CHIP_TEXT = {ok: 'Healthy', warn: 'Attention', bad: 'Down', idle: 'Idle'};
 const worst = levels => levels.reduce((a, b) => (RANK[b] > RANK[a] ? b : a), 'ok');
 const pctLevel = pct => (pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : 'ok');
+
+// Split Gemini tab windows into Gemini vs. Claude & GPT pools when partner models are present,
+// stripping the redundant pool suffix from individual ring labels (the pool header names it).
+function geminiPoolGroups(windows) {
+    const gemini = [];
+    const partner = [];
+    for (const w of windows) {
+        const m = /^(.+?)\s*·\s*(.+)$/.exec(w.label ?? '');
+        const span = m ? m[1] : w.label;
+        const scope = m ? m[2] : '';
+        if (/claude|gpt/i.test(scope)) {
+            partner.push({w, displayLabel: span});
+        } else {
+            const sub = scope.replace(/^gemini\b\s*/i, '').trim();
+            gemini.push({w, displayLabel: sub ? `${span} · ${sub}` : span});
+        }
+    }
+    if (!partner.length)
+        return null;
+    const groups = [];
+    if (gemini.length) {
+        groups.push({
+            key: 'gemini',
+            title: 'Gemini',
+            subtitle: 'Google',
+            icons: [{key: 'gemini', cls: 'au-pool-icon-gemini'}],
+            items: gemini,
+        });
+    }
+    groups.push({
+        key: 'partner',
+        title: 'Claude & GPT',
+        subtitle: 'Anthropic · OpenAI',
+        icons: [
+            {key: 'claude', cls: 'au-pool-icon-claude'},
+            {key: 'codex', cls: 'au-pool-icon-codex'},
+        ],
+        items: partner,
+    });
+    return groups;
+}
 
 // Length of a limit window, from the label the collector gives it ("5-hour", "Weekly · Opus",
 // "3-day", "90-minute" ...). Used for the pace marker and the "full in" projection.
@@ -2060,23 +2102,58 @@ const AgentUsageIndicator = GObject.registerClass({
                 return prev.get(w.label) ?? 0;
             return clamp(w.pct, 0, 100);
         };
+        const pools = tab.key === 'gemini' ? geminiPoolGroups(windows) : null;
+        if (pools) {
+            card.add_style_class_name('au-limits-grouped');
+            for (const g of pools)
+                card.add_child(this._poolGroup(g, fromOf));
+            return;
+        }
         if (windows.length === 1) {
             card.add_child(this._heroGauge(windows[0], fromOf(windows[0])));
             return;
         }
-        const perRow = windows.length === 4 ? 2 : Math.min(3, windows.length);
         const size = windows.length <= 2 || windows.length === 4 ? 'au-ring-lg' : 'au-ring-md';
+        card.add_child(this._gaugeGrid(windows.map(w => ({w, displayLabel: w.label})), size, fromOf));
+    }
+
+    _poolGroup(g, fromOf) {
+        const box = vbox(`au-pool-group au-pool-${g.key}`, {x_expand: true});
+        const icons = hbox('au-pool-icons', {y_align: ALIGN.CENTER});
+        for (const ic of g.icons) {
+            icons.add_child(new St.Icon({
+                gicon: this._icons[ic.key],
+                style_class: `au-pool-icon ${ic.cls}`,
+                fallback_icon_name: TAB_BY_KEY[ic.key].fallbackIcons[0],
+            }));
+        }
+        const head = add(hbox('au-pool-head', {x_expand: true, y_align: ALIGN.CENTER}),
+            icons,
+            label(g.title, 'au-pool-title', {x_expand: true, y_align: ALIGN.CENTER}),
+            label(g.subtitle, 'au-pool-sub', {y_align: ALIGN.CENTER}));
+        box.add_child(head);
+        if (g.items.length === 1) {
+            const {w, displayLabel} = g.items[0];
+            box.add_child(this._heroGauge(w, fromOf(w), displayLabel, 'au-ring-md'));
+        } else {
+            box.add_child(this._gaugeGrid(g.items, 'au-ring-md', fromOf));
+        }
+        return box;
+    }
+
+    _gaugeGrid(items, size, fromOf) {
+        const perRow = items.length === 4 ? 2 : Math.min(3, items.length);
         const grid = vbox('au-gauge-grid', {x_expand: true});
-        for (let i = 0; i < windows.length; i += perRow) {
+        for (let i = 0; i < items.length; i += perRow) {
             const row = homogeneous(hbox('au-gauge-row', {x_expand: true}));
-            const slice = windows.slice(i, i + perRow);
-            for (const w of slice)
-                row.add_child(this._columnGauge(w, size, fromOf(w)));
+            const slice = items.slice(i, i + perRow);
+            for (const {w, displayLabel} of slice)
+                row.add_child(this._columnGauge(w, size, fromOf(w), displayLabel));
             for (let k = slice.length; k < perRow; k++)
                 row.add_child(blank('', {x_expand: true}));
             grid.add_child(row);
         }
-        card.add_child(grid);
+        return grid;
     }
 
     _ring(w, sizeClass, from) {
@@ -2114,10 +2191,11 @@ const AgentUsageIndicator = GObject.registerClass({
         return label(lv === 'bad' ? 'Near limit' : 'Running high', `au-tag au-level-${lv}`);
     }
 
-    _heroGauge(w, from) {
-        const row = hbox('au-gauge-hero', {x_expand: true});
+    _heroGauge(w, from, displayLabel = w.label, sizeClass = 'au-ring-xl') {
+        const compact = sizeClass !== 'au-ring-xl';
+        const row = hbox(compact ? 'au-gauge-hero au-gauge-hero-sm' : 'au-gauge-hero', {x_expand: true});
         const info = vbox('au-gauge-info', {x_expand: true, y_align: ALIGN.CENTER});
-        const title = add(hbox('au-gauge-title'), label(w.label, 'au-gauge-label'), this._levelTag(w));
+        const title = add(hbox('au-gauge-title'), label(displayLabel, 'au-gauge-label'), this._levelTag(w));
         const reset = label('', 'au-gauge-reset');
         const when = label('', 'au-gauge-when');
         const pace = label('', 'au-gauge-pace');
@@ -2137,12 +2215,12 @@ const AgentUsageIndicator = GObject.registerClass({
             }
         });
         add(info, title, reset, when, pace);
-        return add(row, this._ring(w, 'au-ring-xl', from), info);
+        return add(row, this._ring(w, sizeClass, from), info);
     }
 
-    _columnGauge(w, size, from) {
+    _columnGauge(w, size, from, displayLabel = w.label) {
         const col = vbox('au-gauge-col', {x_expand: true});
-        const name = label(w.label, 'au-gauge-label au-gauge-label-sm', {x_align: ALIGN.CENTER});
+        const name = label(displayLabel, 'au-gauge-label au-gauge-label-sm', {x_align: ALIGN.CENTER});
         const reset = label('', 'au-gauge-reset-sm', {x_align: ALIGN.CENTER});
         const extra = label('', 'au-gauge-pace-sm', {x_align: ALIGN.CENTER});
         this._live(() => {

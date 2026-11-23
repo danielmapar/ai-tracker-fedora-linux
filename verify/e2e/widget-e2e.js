@@ -630,9 +630,17 @@ function defineTests(ext) {
 
     test('Limits', 'Gemini: model group quota rings, AI credits and stale fallback', async c => {
         await c.show('two', 'gemini');
-        c.expectText(/5-hour · Gemini/); c.expectText(/5-hour · Claude & GPT/);
+        c.expectText(/^Gemini$/m); c.expectText(/^Google$/m);
+        c.expectText(/^Claude & GPT$/m); c.expectText(/^Anthropic · OpenAI$/m);
+        c.expectText(/^5-hour$/m);
         c.expectText(/^22%$/m); c.expectText(/^5%$/m);
         c.expectText(/^Credits$/m); c.expectText(/^500$/m);
+        const pools = [];
+        walk(c.menu(), a => {
+            if (a.mapped && a.has_style_class_name?.('au-pool-group'))
+                pools.push(a.has_style_class_name('au-pool-partner') ? 'partner' : 'gemini');
+        });
+        eq(pools, ['gemini', 'partner'], 'distinct Gemini and Claude & GPT pool groups');
         await c.show('apierror', 'gemini');
         c.expectText(/Saved numbers from \d\d:\d\d/);
         c.expectText(/^18%$/m, 'saved Gemini quota');
@@ -985,10 +993,16 @@ function defineTests(ext) {
         c.tab('gemini'); await sleep(500);
         c.expectText(/gemini-user@example\.com|user@example\.com/); c.expectText(/^Ultra$/m);
         c.expectText(/Google login/);
-        c.expectText(/5-hour · Gemini/);
-        c.expectText(/Weekly · Gemini/);
-        c.expectText(/5-hour · Claude & GPT/);
-        c.expectText(/Weekly · Claude & GPT/);
+        c.expectText(/^Gemini$/m); c.expectText(/^Google$/m);
+        c.expectText(/^Claude & GPT$/m); c.expectText(/^Anthropic · OpenAI$/m);
+        c.expectText(/^5-hour$/m);
+        c.expectText(/^Weekly$/m);
+        const pools = [];
+        walk(c.menu(), a => {
+            if (a.mapped && a.has_style_class_name?.('au-pool-group'))
+                pools.push(a.has_style_class_name('au-pool-partner') ? 'partner' : 'gemini');
+        });
+        eq(pools, ['gemini', 'partner'], 'Gemini and Claude & GPT pool cards');
         c.expectText(/from cache/);
         c.expectText(/Connected/);
     });
