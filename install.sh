@@ -104,7 +104,12 @@ if [ -z "$shell_pid" ]; then
     echo "    GNOME Shell is not running; the widget loads at your next login."
     exit 0
 fi
-shell_started=$(( $(date +%s) - $(ps -o etimes= -p "$shell_pid" | tr -d ' ') ))
+shell_etimes=$(ps -o etimes= -p "$shell_pid" 2>/dev/null | tr -d ' ' || true)
+if [ -z "$shell_etimes" ]; then
+    echo "    GNOME Shell is not running; the widget loads at your next login."
+    exit 0
+fi
+shell_started=$(( $(date +%s) - shell_etimes ))
 loader_mtime=$(stat -c %Y "$DEST/extension.js")
 if [ "$loader_changed" = 0 ] && [ "$shell_started" -gt "$loader_mtime" ] && gnome-extensions info "$UUID" >/dev/null 2>&1; then
     # This shell runs the current loader: a disable/enable imports the new build.

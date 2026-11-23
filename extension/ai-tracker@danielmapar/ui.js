@@ -110,6 +110,11 @@ const ALIGN = Clutter.ActorAlign;
 // shows) changes: a streamed frame that brings in one part rebuilds one card, and switching tabs
 // rebuilds nothing.
 const SECTIONS = ['banner', 'account', 'limits', 'tokens', 'remote'];
+const REMOTE_PARTS = {
+    claude: ['claude.drops'],
+    codex: ['codex.relay', 'codex.events'],
+    gemini: ['gemini.drops'],
+};
 const EASE_OUT = Clutter.AnimationMode.EASE_OUT_CUBIC;
 
 // ---------------------------------------------------------------------------------------------
@@ -327,10 +332,10 @@ function paceText(w, p) {
     return {level: 'ok', text: `On pace for ~${Math.round(p.projected)}% by reset`, short: null};
 }
 
-function resetText(w) {
+function resetText(w, now = nowS()) {
     if (!w.resets_at)
         return w.pct > 0 ? 'Reset time unknown' : 'Window not started';
-    const left = w.resets_at - nowS();
+    const left = w.resets_at - now;
     if (left <= 0)
         return 'Reset due · refresh';
     return `Resets in ${fmtDuration(left)}`;
@@ -364,7 +369,7 @@ function accountModel(key, acc) {
     };
 }
 
-function usageModel(u) {
+function usageModel(u, allowStale = true) {
     if (!u || typeof u !== 'object')
         return {error: 'This snapshot has no usage data', windows: [], extras: [], limitReached: null, missing: true};
     if (u.off) // live Claude limits are opt-in (see the README)
@@ -372,9 +377,9 @@ function usageModel(u) {
     if (u.error) {
         // The collector returns the last successful numbers under `stale` when a live fetch fails
         // (e.g. claude.ai rate-limiting). Show them, clearly marked as saved.
-        const s = u.stale;
+        const s = allowStale ? u.stale : null;
         if (s && typeof s === 'object' && Array.isArray(s.windows) && s.windows.length) {
-            const m = usageModel({...s, error: undefined, stale: undefined});
+            const m = usageModel({...s, error: undefined, stale: undefined}, false);
             const at = num(s.fetched_at);
             const when = (Number.isFinite(at) && GLib.DateTime.new_from_unix_local(at)?.format('%H:%M')) || 'earlier';
             return {...m, staleAt: when, staleNote: clip(u.error)};
@@ -400,12 +405,14 @@ function usageModel(u) {
     return {error: null, windows, extras, limitReached: u.limit_reached ? `${u.limit_reached}` : null};
 }
 
-function tokensModel(key, t) {
+function tokensModel(key, t, allowStale = true) {
     if (!t || typeof t !== 'object')
         return null;
     // A failed fetch (slow or unreachable service) carries the last good totals under `stale`.
     let staleAt = null;
     if (t.error) {
+        if (!allowStale)
+            return null;
         const s = t.stale;
         if (!s || typeof s !== 'object')
             return null;
@@ -699,7 +706,7 @@ function geminiWorkers(w, pending = new Set()) {
             ...daemon, level: bad ? 'bad' : 'warn',
             detail: [`${state}${bad ? '' : '…'}`, inst].filter(Boolean).join(' · '),
             issue: state === 'Error' ? 'Daemon error'
-                : state === 'Disconnected' ? 'Daemon offline' : `${state ?? 'Starting'}…`,
+                : state === 'Disconnected' ? 'Daemon offline' : `${state}…`,
             action: {
                 id: 'gemini-restart', label: bad ? 'Restart daemon' : 'Restart anyway',
                 argv: ['systemctl', '--user', 'restart', GEMINI_UNIT],
@@ -742,8 +749,8 @@ function buildModel(key, d, pending = new Set()) {
         if (uPlan)
             account.plan = planName(uPlan);
     }
-    const usage = usageModel(d.usage);
-    const tokens = tokensModel(key, d.tokens);
+    const usage = usageModel(d.usage, account.loggedIn);
+    const tokens = tokensModel(key, d.tokens, account.loggedIn);
     const w = d.workers && typeof d.workers === 'object' ? d.workers : null;
     const workersFor = key === 'claude' ? claudeWorkers : key === 'codex' ? codexWorkers : geminiWorkers;
     const remote = w
@@ -800,7 +807,6 @@ function buildModel(key, d, pending = new Set()) {
 // ---------------------------------------------------------------------------------------------
 
 const rgba = c => [c.red / 255, c.green / 255, c.blue / 255, c.alpha / 255];
-const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
 
 function themeColor(node, prop, fallback) {
     const [found, color] = node.lookup_color(prop, false);
@@ -885,6 +891,10 @@ const AuRing = GObject.registerClass({
     vfunc_repaint() {
         const cr = this.get_context();
         const [w, h] = this.get_surface_size();
+        if (w <= 0 || h <= 0) {
+            cr.$dispose();
+            return;
+        }
         const node = this.get_theme_node();
         const fg = rgba(node.get_foreground_color());
         const track = themeColor(node, '-au-ring-track', [1, 1, 1, 0.1]);
@@ -895,6 +905,10 @@ const AuRing = GObject.registerClass({
         const lw = Math.max(2, Math.round(size * themeDouble(node, '-au-ring-thickness', 0.1)));
         const halo = Math.round(lw * 0.6);
         const r = (size - lw - halo) / 2;
+        if (r <= 0) {
+            cr.$dispose();
+            return;
+        }
         const cx = w / 2;
         const cy = h / 2;
         const TAU = 2 * Math.PI;
@@ -921,10 +935,16 @@ const AuRing = GObject.registerClass({
             cr.setLineWidth(lw);
             const span = end - top;
             const steps = Math.max(6, Math.ceil(frac * 96));
+            const [r0, g0, b0, a0] = c0;
+            const dr = c1[0] - r0;
+            const dg = c1[1] - g0;
+            const db = c1[2] - b0;
+            const da = c1[3] - a0;
             for (let i = 0; i < steps; i++) {
                 const a = top + span * (i / steps);
                 const b = top + span * ((i + 1) / steps) + (i < steps - 1 ? 0.012 : 0);
-                cr.setSourceRGBA(...mix(c0, c1, (i + 0.5) / steps));
+                const t = (i + 0.5) / steps;
+                cr.setSourceRGBA(r0 + dr * t, g0 + dg * t, b0 + db * t, a0 + da * t);
                 cr.newPath();
                 cr.arc(cx, cy, r, a, b);
                 cr.stroke();
@@ -954,6 +974,10 @@ const AuBar = GObject.registerClass({
     vfunc_repaint() {
         const cr = this.get_context();
         const [w, h] = this.get_surface_size();
+        if (w <= 0 || h <= 0) {
+            cr.$dispose();
+            return;
+        }
         const node = this.get_theme_node();
         const fg = rgba(node.get_foreground_color());
         const c0 = themeColor(node, '-au-ring-from', fg);
@@ -988,14 +1012,19 @@ const AuTimeline = GObject.registerClass({
         this._end = nowS();
     }
 
-    tick() {
-        this._end = nowS();
+    tick(now = nowS()) {
+        this._start = localMidnight();
+        this._end = now;
         this.queue_repaint();
     }
 
     vfunc_repaint() {
         const cr = this.get_context();
         const [w, h] = this.get_surface_size();
+        if (w <= 0 || h <= 0) {
+            cr.$dispose();
+            return;
+        }
         const node = this.get_theme_node();
         const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
         const span = Math.max(1, this._end - this._start);
@@ -1128,6 +1157,10 @@ const label = (text, style, props = {}) => new St.Label({
     text: text ?? '', style_class: style ?? '', y_align: ALIGN.CENTER, ...props,
 });
 const blank = (style, props = {}) => new St.Widget({style_class: style ?? '', ...props});
+const setText = (lbl, s) => {
+    if (lbl.text !== s)
+        lbl.text = s;
+};
 
 function wrapped(text, style, props = {}) {
     const l = label(text, style, {x_expand: true, ...props});
@@ -1200,7 +1233,7 @@ const AgentUsageIndicator = GObject.registerClass({
 
         this._tab = 'claude';
         this._data = null; // last good snapshot
-        this._models = null; // {claude, codex} built from it
+        this._models = null; // {claude, codex, gemini} built from it
         this._fetchedAt = 0;
         this._fetchSecs = 0;
         this._lastError = null; // {title, detail} of the last failed run
@@ -1210,6 +1243,7 @@ const AgentUsageIndicator = GObject.registerClass({
         this._tickId = 0;
         this._stale = false;
         this._destroyed = false;
+        this._quitting = false;
         this._liveFns = null; // collection target while a section is being built
         this._rings = null; // idem
         this._pages = {}; // tab key -> {box, missing, sections: {name -> {key, actor, live, rings}}}
@@ -1245,7 +1279,7 @@ const AgentUsageIndicator = GObject.registerClass({
             link.export(Gio.DBus.session, APP_DBUS_PATH);
             this._appLink = link;
         } catch (e) {
-            // Another copy holds the path (it is removed when this one is added to the panel).
+            // Another instance holds the D-Bus path (e.g. a separate active extension).
             logError(e, 'agent-usage: could not export the app link');
         }
     }
@@ -1271,8 +1305,9 @@ const AgentUsageIndicator = GObject.registerClass({
 
     // Quit: turn the extension off (GNOME remembers it across logins) until the app opens it again.
     _quit() {
-        if (this._destroyed || !this._uuid)
+        if (this._destroyed || this._quitting || !this._uuid)
             return;
+        this._quitting = true;
         const uuid = this._uuid;
         this.menu.close(BoxPointer.PopupAnimation.NONE);
         Main.notify('AI Tracker quit', 'Open it again from Activities: search for AI Tracker.');
@@ -1340,14 +1375,14 @@ const AgentUsageIndicator = GObject.registerClass({
     _buildMenu() {
         this.menu.actor.add_style_class_name('au-menu');
         const item = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false, style_class: 'au-menu-item'});
-        // No accent class on the root: each tab page carries its own (au-claude / au-codex) for good,
-        // so switching tabs restyles only the progress bar and the footer, not the whole menu.
+        // No accent class on the root: each tab page carries its own (au-claude / au-codex /
+        // au-gemini) for good, so switching tabs restyles only the progress bar and the footer.
         this._root = vbox('au-root', {x_expand: true});
         this._accent = null;
         item.add_child(this._root);
         this.menu.addMenuItem(item);
 
-        // Tabs: segmented control with per-tab accent and a status dot for the other tab.
+        // Tabs: segmented control with per-tab accent and a status dot for each tab with trouble.
         const tabs = homogeneous(hbox('au-tabs', {x_expand: true}));
         this._tabButtons = {};
         this._tabDots = {};
@@ -1417,11 +1452,13 @@ const AgentUsageIndicator = GObject.registerClass({
             return;
         if (open) {
             if (this._data) {
-                // Instant: the last snapshot is already rendered; dim it while we refresh.
+                // Instant: the last snapshot is already rendered; dim it unless a run already delivered frames.
                 this._updateLive();
-                this._stale = true;
-                this._content.remove_all_transitions();
-                this._content.opacity = DIM;
+                if (!this._proc || this._runFrames === 0) {
+                    this._stale = true;
+                    this._content.remove_all_transitions();
+                    this._content.opacity = DIM;
+                }
             }
             this._startTick();
             this._refresh();
@@ -1563,9 +1600,16 @@ const AgentUsageIndicator = GObject.registerClass({
             this._clearWatchdog();
             if (error instanceof GLib.Error && error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                 return;
+            if (this._actionMsg?.level === 'ok')
+                this._actionMsg = null; // the re-check after a fix is done (success or failure)
             if (complete) {
-                if (this._actionMsg?.level === 'ok')
-                    this._actionMsg = null; // the re-check after a fix is done; the rows say the rest
+                if (this._stale) {
+                    this._stale = false;
+                    this._content.remove_all_transitions();
+                    this._content.translation_x = 0;
+                    this._content.translation_y = 0;
+                    this._content.opacity = 255;
+                }
                 this._fetchSecs = elapsed();
                 this._syncAnimations();
                 return;
@@ -1584,7 +1628,7 @@ const AgentUsageIndicator = GObject.registerClass({
             else if (junk)
                 this._fail('Could not read usage data', 'The collector printed something that is not JSON.');
             else {
-                const status = proc.get_if_exited() ? proc.get_exit_status() : null;
+                const status = proc.get_identifier() === null && proc.get_if_exited() ? proc.get_exit_status() : null;
                 this._fail('Could not read usage data', status
                     ? `The collector exited with status ${status}.` : 'The collector printed nothing.');
             }
@@ -1601,6 +1645,16 @@ const AgentUsageIndicator = GObject.registerClass({
             if (this._destroyed || this._proc !== proc)
                 return;
             if (line === null) {
+                // On silent EOF, wait for process exit before reading get_if_exited() (which asserts pid == 0).
+                if (!complete && !frames && !junk && !timedOut && proc.get_identifier() !== null) {
+                    proc.wait_async(cancellable, (p, wres) => {
+                        try {
+                            p.wait_finish(wres);
+                        } catch {}
+                        finish(null);
+                    });
+                    return;
+                }
                 finish(null);
                 return;
             }
@@ -1678,7 +1732,7 @@ const AgentUsageIndicator = GObject.registerClass({
         this._setAccent(this._tab);
         this._syncStatusMarks();
 
-        const tab = TABS.find(t => t.key === this._tab);
+        const tab = TAB_BY_KEY[this._tab];
         const built = []; // rings of the sections (re)built now, with their start values
         if (!this._data) {
             this._showState();
@@ -1804,10 +1858,9 @@ const AgentUsageIndicator = GObject.registerClass({
         case 'limits':
             return JSON.stringify([m.usage, m.account.loggedIn, m.account.meta, loading([`${tab.key}.usage`])]);
         case 'tokens':
-            return JSON.stringify([m.tokens, loading(['codex.tokens'])]);
+            return JSON.stringify([m.tokens, loading(tab.key === 'codex' ? ['codex.tokens'] : [])]);
         default:
-            return JSON.stringify([m.remote, loading(['codex.relay', 'claude.drops', 'codex.events', 'gemini.drops']),
-                this._actionBusy, this._actionErr]);
+            return JSON.stringify([m.remote, loading(REMOTE_PARTS[tab.key] ?? []), this._actionBusy, this._actionErr]);
         }
     }
 
@@ -1872,16 +1925,17 @@ const AgentUsageIndicator = GObject.registerClass({
     }
 
     _updateLive() {
+        const now = nowS();
         for (const rec of this._pageSections()) {
             for (const fn of rec.live) {
                 try {
-                    fn();
+                    fn(now);
                 } catch (e) {
                     logError(e, 'agent-usage: live update');
                 }
             }
         }
-        this._updateFooter();
+        this._updateFooter(now);
     }
 
     _live(fn) {
@@ -1919,7 +1973,7 @@ const AgentUsageIndicator = GObject.registerClass({
         return false;
     }
 
-    _updateFooter() {
+    _updateFooter(now = nowS()) {
         const s = this._status;
         let text = '';
         let tone = null; // busy | ok | warn
@@ -1940,12 +1994,11 @@ const AgentUsageIndicator = GObject.registerClass({
             text = `Last attempt ${fmtClock(this._lastError.at)}`;
             tone = 'warn';
         } else if (this._data) {
-            const age = nowS() - this._fetchedAt;
+            const age = now - this._fetchedAt;
             const when = age < 45 ? `Updated ${fmtClock(this._fetchedAt)}` : `Updated ${fmtDuration(age)} ago`;
             text = this._fetchSecs ? `${when} · ${this._fetchSecs.toFixed(1)} s` : when;
         }
-        if (s.text !== text)
-            s.text = text;
+        setText(s, text);
         for (const t of ['busy', 'ok', 'warn'])
             setClass(s, `au-footer-${t}`, t === tone);
     }
@@ -2067,7 +2120,7 @@ const AgentUsageIndicator = GObject.registerClass({
                 : 'They need your Claude Code login, which Anthropic reserves for its own apps. To turn ' +
                   'them on anyway, add "claude_live_limits": true to ~/.config/ai-tracker/config.json.';
             card.add_child(this._notice('dialog-information-symbolic', 'Live limits are off', offNote, 'idle'));
-        } else if (!m.account.loggedIn && (u.error || !u.windows.length)) {
+        } else if (!m.account.loggedIn) {
             const genericOut = tab.key === 'claude' ? 'Not signed in to Claude Code' : 'Not signed in to Gemini (Antigravity)';
             card.add_child(this._notice('system-lock-screen-symbolic', 'Signed out',
                 u.error && u.error !== genericOut ? u.error : m.account.meta, 'bad'));
@@ -2083,12 +2136,14 @@ const AgentUsageIndicator = GObject.registerClass({
             }
             this._gauges(card, u.windows, tab, reason);
         }
-        if (u.limitReached) {
-            card.add_child(this._notice('dialog-error-symbolic', 'Rate limit reached',
-                `Codex reports the ${u.limitReached} limit as reached.`, 'bad'));
+        if (m.account.loggedIn && !u.off && !(loading && u.missing)) {
+            if (u.limitReached) {
+                card.add_child(this._notice('dialog-error-symbolic', 'Rate limit reached',
+                    `Codex reports the ${u.limitReached} limit as reached.`, 'bad'));
+            }
+            for (const x of u.extras)
+                card.add_child(this._extraRow(x));
         }
-        for (const x of u.extras)
-            card.add_child(this._extraRow(x));
         sec.add_child(card);
         return sec;
     }
@@ -2173,11 +2228,11 @@ const AgentUsageIndicator = GObject.registerClass({
         });
         add(stack, ring, center);
         ring.connect('notify::value', () => {
-            pct.text = `${Math.round(ring.value >= target - 0.01 ? w.pct : ring.value)}%`;
+            setText(pct, `${Math.round(Math.abs(ring.value - target) < 0.01 ? w.pct : ring.value)}%`);
         });
         this._rings?.push({ring, from});
-        this._live(() => {
-            ring.pace = paceInfo(w, nowS())?.elapsed ?? null;
+        this._live(now => {
+            ring.pace = paceInfo(w, now)?.elapsed ?? null;
         });
         return stack;
     }
@@ -2199,18 +2254,19 @@ const AgentUsageIndicator = GObject.registerClass({
         const reset = label('', 'au-gauge-reset');
         const when = label('', 'au-gauge-when');
         const pace = label('', 'au-gauge-pace');
-        this._live(() => {
-            const p = paceInfo(w, nowS());
-            reset.text = resetText(w);
-            when.text = [
+        this._live(now => {
+            const p = paceInfo(w, now);
+            setText(reset, resetText(w, now));
+            const whenStr = [
                 w.resets_at ? fmtClock(w.resets_at) : null,
                 p ? `${Math.round(p.elapsed * 100)}% of window elapsed` : null,
             ].filter(Boolean).join(' · ');
-            when.visible = when.text !== '';
+            setText(when, whenStr);
+            when.visible = whenStr !== '';
             const pt = paceText(w, p);
             pace.visible = pt !== null;
             if (pt) {
-                pace.text = pt.text;
+                setText(pace, pt.text);
                 setLevel(pace, pt.level);
             }
         });
@@ -2223,13 +2279,13 @@ const AgentUsageIndicator = GObject.registerClass({
         const name = label(displayLabel, 'au-gauge-label au-gauge-label-sm', {x_align: ALIGN.CENTER});
         const reset = label('', 'au-gauge-reset-sm', {x_align: ALIGN.CENTER});
         const extra = label('', 'au-gauge-pace-sm', {x_align: ALIGN.CENTER});
-        this._live(() => {
-            reset.text = resetText(w).replace(/^Resets in /, 'resets in ');
-            const tag = w.pct >= 100 ? {level: 'bad', short: 'limit reached'} : paceText(w, paceInfo(w, nowS()));
+        this._live(now => {
+            setText(reset, resetText(w, now).replace(/^Resets in /, 'resets in '));
+            const tag = w.pct >= 100 ? {level: 'bad', short: 'limit reached'} : paceText(w, paceInfo(w, now));
             const show = tag !== null && tag.level !== 'ok';
             extra.visible = show;
             if (show) {
-                extra.text = tag.short;
+                setText(extra, tag.short);
                 setLevel(extra, tag.level);
             }
         });
@@ -2257,7 +2313,7 @@ const AgentUsageIndicator = GObject.registerClass({
 
     _tokens(m) {
         const t = m.tokens;
-        // Claude's are counted locally (always in the first frame); Codex's come from its account.
+        // Claude and Gemini tokens are counted locally (in the first frame); Codex's come from its account.
         const parts = m.key === 'codex' ? ['codex.tokens'] : [];
         const loading = parts.some(p => this._pending.has(p));
         const sec = this._section(t?.title ?? 'Tokens', t?.aside, loading, !!t?.staleAt);
@@ -2357,7 +2413,7 @@ const AgentUsageIndicator = GObject.registerClass({
             text, chip);
     }
 
-    // "Up 6h 40m · 3 brief drops today · longest 14s · last 18:47" over a midnight → now strip.
+    // "Up 6h 40m · 3 drops today, longest 14s" over a midnight → now strip.
     _history(h) {
         const box = vbox('au-history', {x_expand: true});
         const text = wrapped('', 'au-history-text');
@@ -2367,9 +2423,9 @@ const AgentUsageIndicator = GObject.registerClass({
         const axis = add(hbox('au-timeline-axis', {x_expand: true}),
             label('00:00', 'au-timeline-tick', {x_expand: true}), label('now', 'au-timeline-tick'));
         add(box, text, strip, axis);
-        this._live(() => {
-            text.text = h.text(nowS());
-            strip.tick();
+        this._live(now => {
+            setText(text, h.text(now));
+            strip.tick(now);
         });
         this._pendingFx(box, h.parts);
         return box;
@@ -2435,8 +2491,10 @@ const AgentUsageIndicator = GObject.registerClass({
         try {
             proc = Gio.Subprocess.new(a.argv, Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_PIPE);
         } catch (e) {
-            this._actionMsg = {text: `${a.label} failed: ${e.message ?? e}`, level: 'bad'};
-            this._updateFooter();
+            const msg = e.message ?? `${e}`;
+            this._actionErr = {id: a.id, text: msg};
+            this._actionMsg = {text: `${a.label} failed: ${msg}`, level: 'bad'};
+            this._render('patch');
             return;
         }
         this._actionBusy = a.id;
@@ -2496,13 +2554,7 @@ const AgentUsageIndicator = GObject.registerClass({
         sk.add_child(acc);
 
         const card = vbox('au-card au-limits', {x_expand: true});
-        const rings = homogeneous(hbox('au-gauge-row', {x_expand: true}));
-        for (let i = 0; i < 2; i++) {
-            rings.add_child(add(vbox('au-gauge-col', {x_expand: true}),
-                new AuRing({style_class: 'au-ring au-ring-lg au-skel-ring', x_align: ALIGN.CENTER}),
-                blank('au-skel au-skel-line-xs', {x_align: ALIGN.CENTER})));
-        }
-        card.add_child(rings);
+        this._skeletonGauges(card);
         sk.add_child(add(vbox('au-section', {x_expand: true}), line('au-skel-title'), card));
 
         const tiles = homogeneous(hbox('au-tiles', {x_expand: true}));

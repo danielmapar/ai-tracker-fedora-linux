@@ -25,9 +25,9 @@
 
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,6 +180,20 @@ struct FileState {
 }
 
 impl FileState {
+    fn new(path: Vec<u8>) -> Self {
+        FileState {
+            path,
+            dev: 0,
+            ino: 0,
+            offset: 0,
+            mtime_ns: i64::MIN,
+            max_ts: NONE_TS,
+            head: 0,
+            tail: 0,
+            stopped: false,
+        }
+    }
+
     fn reset(&mut self) {
         self.offset = 0;
         self.max_ts = NONE_TS;
@@ -317,7 +331,7 @@ impl<'a> Rd<'a> {
 }
 
 pub(crate) fn cache_dir(h: &Path) -> Option<PathBuf> {
-    if std::env::var_os("AGENT_USAGE_NO_CACHE").is_some_and(|v| !v.is_empty() && v != "0") {
+    if crate::system::env_on("AGENT_USAGE_NO_CACHE") {
         return None;
     }
     match std::env::var_os("AGENT_USAGE_CACHE_DIR") {
@@ -332,18 +346,6 @@ fn load(dir: &Path, spec: &Spec) -> Option<Cache> {
     Cache::decode(&b, spec.magic)
 }
 
-fn save(dir: &Path, spec: &Spec, c: &Cache) {
-    if !crate::private_dir(dir) {
-        return;
-    }
-    let cache_file = spec.cache_file;
-    let tmp = dir.join(format!(".{cache_file}.{}", std::process::id()));
-    let ok = crate::create_temp(&tmp).and_then(|mut f| f.write_all(&c.encode(spec.magic))).is_ok();
-    if !ok || fs::rename(&tmp, dir.join(cache_file)).is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-}
-
 // ---------- walking ----------
 
 struct Found {
@@ -353,25 +355,32 @@ struct Found {
     included: bool,
 }
 
-/// Depth-first walk using `DirEntry::metadata` (does not follow symlinks).
-/// Only regular files matching `match_file` count: symlinks, FIFOs and devices are skipped.
+/// Depth-first walk using `DirEntry::file_type` (`d_type`, zero syscalls on Linux filesystems)
+/// before `lstat` / path allocation. Only regular files matching `match_file` count.
 fn walk(dir: &Path, since: i64, depth: u32, match_file: fn(&Path) -> bool, out: &mut Vec<Found>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
-        let p = e.path();
-        let Ok(md) = e.metadata() else { continue };
-        if md.is_dir() {
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
             if depth > 0 {
-                walk(&p, since, depth - 1, match_file, out);
+                walk(&e.path(), since, depth - 1, match_file, out);
             }
-        } else if md.is_file() && match_file(&p) {
+        } else if ft.is_file() {
+            let name = e.file_name();
+            if !match_file(Path::new(&name)) {
+                continue;
+            }
+            let Ok(md) = e.metadata() else { continue };
+            if !md.is_file() {
+                continue;
+            }
             let mtime = md
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            out.push(Found { path: p, md, included: mtime >= since });
+            out.push(Found { path: e.path(), md, included: mtime >= since });
         }
     }
 }
@@ -392,6 +401,17 @@ fn fingerprint(f: &File, offset: u64) -> Option<(u64, u64)> {
 }
 
 // ---------- scanning ----------
+
+struct Plan {
+    idx: usize,
+    path: Vec<u8>,
+    file: File,
+    start: u64,
+    size: u64,
+    dev: u64,
+    ino: u64,
+    mtime_ns: i64,
+}
 
 struct Job {
     plan: usize,
@@ -435,7 +455,7 @@ fn scan_claude_line(
     if e.kind.as_deref() != Some("assistant") {
         return;
     }
-    let Some(t) = e.timestamp.as_deref().and_then(crate::parse_iso) else { return };
+    let Some(t) = e.timestamp.as_deref().and_then(crate::system::parse_iso) else { return };
     let Some(m) = e.message else { return };
     let Some(u) = m.usage else { return };
     if t > *max_ts {
@@ -472,7 +492,7 @@ fn scan_gemini_line(
     if e.kind.as_deref() != Some("PLANNER_RESPONSE") {
         return;
     }
-    let Some(t) = e.created_at.as_deref().and_then(crate::parse_iso) else { return };
+    let Some(t) = e.created_at.as_deref().and_then(crate::system::parse_iso) else { return };
     if e.input_tokens.is_none()
         && e.output_tokens.is_none()
         && e.cache_creation_tokens.is_none()
@@ -526,28 +546,25 @@ fn read_region(f: &File, start: u64, end: Option<u64>, hint: u64) -> std::io::Re
             Ok(buf)
         }
         None => {
-            let mut buf = Vec::with_capacity(hint.min(MAX_REGION) as usize + 4096);
+            let mut buf = Vec::with_capacity(hint.min(MAX_REGION) as usize);
+            let mut scratch = [0u8; 32 * 1024];
             let mut pos = start;
             loop {
-                if buf.len() as u64 > MAX_REGION {
+                let max_left = (MAX_REGION + 1).saturating_sub(buf.len() as u64);
+                if max_left == 0 {
                     return Err(too_big());
                 }
-                if buf.capacity() - buf.len() < 64 * 1024 {
-                    buf.reserve(1 << 20);
-                }
-                let len = buf.len();
-                let cap = buf.capacity();
-                buf.resize(cap, 0);
-                match f.read_at(&mut buf[len..], pos) {
-                    Ok(0) => {
-                        buf.truncate(len);
-                        return Ok(buf);
-                    }
+                let take = (max_left as usize).min(scratch.len());
+                match f.read_at(&mut scratch[..take], pos) {
+                    Ok(0) => return Ok(buf),
                     Ok(n) => {
-                        buf.truncate(len + n);
+                        if buf.len() as u64 + n as u64 > MAX_REGION {
+                            return Err(too_big());
+                        }
+                        buf.extend_from_slice(&scratch[..n]);
                         pos += n as u64;
                     }
-                    Err(e) if e.kind() == ErrorKind::Interrupted => buf.truncate(len),
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -602,10 +619,13 @@ fn scan_job(
 }
 
 /// Split [start, size) into chunks that end just after a '\n'; the last one reads to EOF.
-fn split(f: &File, plan: usize, start: u64, size: u64, jobs: &mut Vec<Job>) {
+/// Reuses `probe` lazily so small files/appends allocate nothing.
+fn split(f: &File, plan: usize, start: u64, size: u64, probe: &mut Vec<u8>, jobs: &mut Vec<Job>) {
     let mut s = start;
-    let mut probe = vec![0u8; 64 * 1024];
     while size > s && size - s > CHUNK + CHUNK / 2 {
+        if probe.is_empty() {
+            probe.resize(64 * 1024, 0);
+        }
         // Find the first '\n' at or after s + CHUNK - 1.
         let mut p = s + CHUNK - 1;
         let mut cut = None;
@@ -631,110 +651,67 @@ fn split(f: &File, plan: usize, start: u64, size: u64, jobs: &mut Vec<Job>) {
     jobs.push(Job { plan, start: s, end: None });
 }
 
-pub struct Report {
-    pub value: serde_json::Value,
-    pub trace: String,
-}
+// ---------- orchestration helpers ----------
 
-/// Tokens Claude Code used on this machine today, from local session transcripts.
-pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
-    tokens_today(h, midnight, &CLAUDE_SPEC)
-}
-
-/// Tokens Gemini (Antigravity CLI) used on this machine today, from local conversation transcripts.
-pub fn gemini_tokens_today(h: &Path, midnight: i64) -> Report {
-    tokens_today(h, midnight, &GEMINI_SPEC)
-}
-
-fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
-    let t0 = Instant::now();
-    let root = h.join(spec.rel_root);
-    let root_b = root.as_os_str().as_encoded_bytes().to_vec();
-    let mut found = Vec::new();
-    walk(&root, midnight, 4, spec.match_file, &mut found);
-    let t_walk = t0.elapsed();
-
-    let dir = cache_dir(h);
-    let loaded = dir.as_deref().and_then(|d| load(d, spec)).filter(|c| c.root == root_b);
-    let warm = loaded.is_some();
-    let mut c = loaded.unwrap_or_else(|| Cache::empty(&root_b, midnight));
-    let mut dirty = !warm;
-    let mut new_day = false;
-    if c.midnight != midnight {
-        // A new local day (or a timezone change): nothing counted so far is today's.
-        new_day = true;
-        dirty = true;
-        c.midnight = midnight;
-        c.winners.clear();
-        c.nokey = [0; 4];
-        for f in &mut c.files {
-            if f.max_ts >= midnight {
-                f.reset();
-            }
-        }
-    }
-
-    let index: HashMap<Vec<u8>, usize> =
-        c.files.iter().enumerate().map(|(i, f)| (f.path.clone(), i)).collect();
-    // Walk position of each cache entry (None: no longer on disk); new files are appended to c.files.
+/// Match walked files against cached file entries without cloning cached paths.
+/// Returns `(order, todo, rebuild)`.
+fn reconcile_files<'a>(
+    c: &mut Cache,
+    found: &'a [Found],
+    midnight: i64,
+    dirty: &mut bool,
+) -> (Vec<Option<u32>>, Vec<(usize, &'a fs::Metadata)>, bool) {
     let mut order: Vec<Option<u32>> = vec![None; c.files.len()];
+    let mut todo: Vec<(usize, &'a fs::Metadata)> = Vec::new();
+    let mut new_files: Vec<FileState> = Vec::new();
     let mut rebuild = false;
-    // (cache index, metadata) of included files, in walk order.
-    let mut todo: Vec<(usize, &fs::Metadata)> = Vec::new();
-    for (pos, fnd) in found.iter().enumerate() {
-        let pb = fnd.path.as_os_str().as_encoded_bytes();
-        let i = match index.get(pb) {
-            Some(&i) => i,
-            None => {
-                if !fnd.included {
-                    continue; // never read and not modified today: nothing to remember
+    {
+        let index: HashMap<&[u8], usize> =
+            c.files.iter().enumerate().map(|(i, f)| (f.path.as_slice(), i)).collect();
+        for (pos, fnd) in found.iter().enumerate() {
+            let pb = fnd.path.as_os_str().as_encoded_bytes();
+            let i = match index.get(pb) {
+                Some(&i) => i,
+                None => {
+                    if !fnd.included {
+                        continue; // never read and not modified today: nothing to remember
+                    }
+                    let idx = c.files.len() + new_files.len();
+                    new_files.push(FileState::new(pb.to_vec()));
+                    order.push(None);
+                    *dirty = true;
+                    idx
                 }
-                c.files.push(FileState {
-                    path: pb.to_vec(),
-                    dev: 0,
-                    ino: 0,
-                    offset: 0,
-                    mtime_ns: i64::MIN,
-                    max_ts: NONE_TS,
-                    head: 0,
-                    tail: 0,
-                    stopped: false,
-                });
-                order.push(None);
-                dirty = true;
-                c.files.len() - 1
+            };
+            order[i] = Some(pos as u32);
+            if fnd.included {
+                todo.push((i, &fnd.md));
+            } else if i < c.files.len() && c.files[i].max_ts >= midnight {
+                rebuild = true; // counted today, but no longer included (mtime moved back)
             }
-        };
-        order[i] = Some(pos as u32);
-        if fnd.included {
-            todo.push((i, &fnd.md));
-        } else if c.files[i].max_ts >= midnight {
-            rebuild = true; // counted today, but no longer included (mtime moved back)
         }
     }
+    c.files.extend(new_files);
     for (i, f) in c.files.iter().enumerate() {
         if order[i].is_none() && f.max_ts >= midnight {
             rebuild = true; // a file that counted today is gone
         }
     }
+    (order, todo, rebuild)
+}
 
-    // Check each included file against its cache entry; open the ones with something to read.
-    struct Plan {
-        idx: usize,
-        path: Vec<u8>,
-        file: File,
-        start: u64,
-        size: u64,
-        dev: u64,
-        ino: u64,
-        mtime_ns: i64,
-    }
-    let mut plans: Vec<Plan> = Vec::new();
-    let mut checked: Vec<(usize, File, u64, u64, u64, i64)> = Vec::new(); // idx, file, size, dev, ino, mtime
-    for &(i, md) in &todo {
+/// Validate cached files against disk, handle rebuilds, and open files with new bytes to scan.
+fn prepare_plans(
+    c: &mut Cache,
+    todo: &[(usize, &fs::Metadata)],
+    midnight: i64,
+    rebuild: &mut bool,
+    dirty: &mut bool,
+) -> Vec<Plan> {
+    let mut checked: Vec<(usize, File, u64, u64, u64, i64)> = Vec::new();
+    for &(i, md) in todo {
         let fs_ = &c.files[i];
-        let unchanged = !md.file_type().is_symlink()
-            && md.dev() == fs_.dev
+        let unchanged = md.dev() == fs_.dev
             && md.ino() == fs_.ino
             && md.len() == fs_.offset
             && mtime_ns(md) == fs_.mtime_ns
@@ -743,63 +720,65 @@ fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
             continue;
         }
         let Ok(file) = open_regular(bytes_path(&fs_.path)) else {
-            // Unreadable now: skips it, so it must not keep counting from the cache.
+            // Unreadable now: skip it, so it must not keep counting from the cache.
             if fs_.max_ts >= midnight {
-                rebuild = true;
+                *rebuild = true;
             }
             c.files[i].reset();
-            dirty = true;
+            *dirty = true;
             continue;
         };
         let Ok(fmd) = file.metadata() else { continue };
-        let (dev, ino, size) = (fmd.dev(), fmd.ino(), fmd.len());
-        let mut consistent = fs_.offset == 0 || (dev == fs_.dev && ino == fs_.ino && size >= fs_.offset);
+        let (dev, ino, size, mt) = (fmd.dev(), fmd.ino(), fmd.len(), mtime_ns(&fmd));
+        // If a file stopped on non-UTF-8 at offset 0, any metadata change forces a re-check so
+        // replacing or rewriting the file never leaves it permanently blacklisted.
+        let mut consistent = (!fs_.stopped && fs_.offset == 0)
+            || (fs_.offset > 0 && dev == fs_.dev && ino == fs_.ino && size >= fs_.offset);
         if consistent && fs_.offset > 0 {
             consistent = fingerprint(&file, fs_.offset) == Some((fs_.head, fs_.tail));
         }
         if !consistent {
             if fs_.max_ts >= midnight {
-                rebuild = true;
+                *rebuild = true;
             }
             c.files[i].reset();
         }
-        checked.push((i, file, size, dev, ino, mtime_ns(md)));
+        checked.push((i, file, size, dev, ino, mt));
     }
 
-    if rebuild {
+    if *rebuild {
         // Recount today from scratch; a prefix whose newest entry predates midnight is still skipped.
-        dirty = true;
+        *dirty = true;
         c.winners.clear();
         c.nokey = [0; 4];
-        let have: std::collections::HashSet<usize> = checked.iter().map(|x| x.0).collect();
+        let have: HashSet<usize> = checked.iter().map(|x| x.0).collect();
         for f in &mut c.files {
             if f.max_ts >= midnight {
                 f.reset();
             }
         }
         // Files skipped above as unchanged may have been reset: open them too.
-        for &(i, md) in &todo {
+        for &(i, _) in todo {
             if have.contains(&i) || c.files[i].offset != 0 {
                 continue;
             }
-            let p = bytes_path(&c.files[i].path).to_path_buf();
-            if let Ok(file) = open_regular(&p) {
+            if let Ok(file) = open_regular(bytes_path(&c.files[i].path)) {
                 if let Ok(fmd) = file.metadata() {
-                    checked.push((i, file, fmd.len(), fmd.dev(), fmd.ino(), mtime_ns(md)));
+                    checked.push((i, file, fmd.len(), fmd.dev(), fmd.ino(), mtime_ns(&fmd)));
                 }
             }
         }
     }
 
+    let mut plans = Vec::new();
     for (idx, file, size, dev, ino, mt) in checked {
         let fs_ = &mut c.files[idx];
         if fs_.stopped || size <= fs_.offset {
-            // Nothing new to read (or never past a stop line): just remember the new mtime.
             if fs_.mtime_ns != mt || fs_.dev != dev || fs_.ino != ino {
                 fs_.mtime_ns = mt;
                 fs_.dev = dev;
                 fs_.ino = ino;
-                dirty = true;
+                *dirty = true;
             }
             continue;
         }
@@ -814,18 +793,21 @@ fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
             mtime_ns: mt,
         });
     }
+    plans
+}
 
-    // Read everything new, in parallel chunks.
-    let mut jobs = Vec::new();
-    for (pi, p) in plans.iter().enumerate() {
-        split(&p.file, pi, p.start, p.size, &mut jobs);
-    }
+/// Run chunk scan jobs across up to `MAX_THREADS` threads (reusing the caller thread as a worker).
+fn run_jobs(plans: &[Plan], jobs: &[Job], midnight: i64, spec: &Spec) -> (Vec<Option<JobOut>>, usize) {
     let fd = Finders {
         a: memmem::Finder::new(spec.finder_a),
         b: spec.finder_b.map(memmem::Finder::new),
     };
     let mut outs: Vec<Option<JobOut>> = (0..jobs.len()).map(|_| None).collect();
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(MAX_THREADS).min(jobs.len());
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(MAX_THREADS)
+        .min(jobs.len());
     let hint = |j: &Job| match j.end {
         Some(e) => e - j.start,
         None => plans[j.plan].size.saturating_sub(j.start),
@@ -848,20 +830,30 @@ fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
             mine
         };
         let results: Vec<Vec<(usize, JobOut)>> = std::thread::scope(|s| {
-            // A thread that cannot be created is simply missing (the others, or this one, do its work).
-            let hs: Vec<_> =
-                (0..threads).filter_map(|_| std::thread::Builder::new().spawn_scoped(s, work).ok()).collect();
-            let mut all: Vec<_> = hs.into_iter().map(|h| h.join().unwrap_or_default()).collect();
+            let hs: Vec<_> = (1..threads)
+                .filter_map(|_| std::thread::Builder::new().spawn_scoped(s, work).ok())
+                .collect();
+            let mut all = Vec::with_capacity(hs.len() + 1);
             all.push(work());
+            all.extend(hs.into_iter().map(|h| h.join().unwrap_or_default()));
             all
         });
         for (k, o) in results.into_iter().flatten() {
             outs[k] = Some(o);
         }
     }
-    let t_scan = t0.elapsed();
+    (outs, threads)
+}
 
-    // Merge, file by file, chunks in order.
+/// Merge scanned chunks into `c`, apply walk/line winner ranking, and return `(total, bytes_read)`.
+fn merge_results(
+    c: &mut Cache,
+    plans: &[Plan],
+    jobs: &[Job],
+    mut outs: Vec<Option<JobOut>>,
+    order: &[Option<u32>],
+    dirty: &mut bool,
+) -> (Tok, u64) {
     let mut bytes = 0u64;
     let mut provisional: Vec<(usize, Hit)> = Vec::new();
     let mut per_plan: Vec<Vec<JobOut>> = (0..plans.len()).map(|_| Vec::new()).collect();
@@ -904,7 +896,7 @@ fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
             tail,
             stopped,
         };
-        dirty = true;
+        *dirty = true;
     }
 
     // The winner of a key is its first occurrence in walk order, then line order.
@@ -953,27 +945,88 @@ fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
             }
         }
     }
+    (total, bytes)
+}
 
-    if let Some(d) = dir.as_deref() {
-        // Forget files that are gone; remap winner file indices.
-        if order.iter().any(|o| o.is_none()) {
-            let mut remap = vec![u32::MAX; c.files.len()];
-            let mut kept = Vec::with_capacity(c.files.len());
-            for (i, f) in std::mem::take(&mut c.files).into_iter().enumerate() {
-                if order[i].is_some() {
-                    remap[i] = kept.len() as u32;
-                    kept.push(f);
-                }
-            }
-            c.files = kept;
-            c.winners.retain(|_, w| remap[w.file as usize] != u32::MAX);
-            for w in c.winners.values_mut() {
-                w.file = remap[w.file as usize];
-            }
-            dirty = true;
+/// Drop cache entries for deleted files and remap winner file indices.
+fn compact_cache(c: &mut Cache, order: &[Option<u32>], dirty: &mut bool) {
+    if !order.iter().any(|o| o.is_none()) {
+        return;
+    }
+    let mut remap = vec![u32::MAX; c.files.len()];
+    let mut kept = Vec::with_capacity(c.files.len());
+    for (i, f) in std::mem::take(&mut c.files).into_iter().enumerate() {
+        if order[i].is_some() {
+            remap[i] = kept.len() as u32;
+            kept.push(f);
         }
+    }
+    c.files = kept;
+    c.winners.retain(|_, w| remap[w.file as usize] != u32::MAX);
+    for w in c.winners.values_mut() {
+        w.file = remap[w.file as usize];
+    }
+    *dirty = true;
+}
+
+pub struct Report {
+    pub value: serde_json::Value,
+    pub trace: String,
+}
+
+/// Tokens Claude Code used on this machine today, from local session transcripts.
+pub fn claude_tokens_today(h: &Path, midnight: i64) -> Report {
+    tokens_today(h, midnight, &CLAUDE_SPEC)
+}
+
+/// Tokens Gemini (Antigravity CLI) used on this machine today, from local conversation transcripts.
+pub fn gemini_tokens_today(h: &Path, midnight: i64) -> Report {
+    tokens_today(h, midnight, &GEMINI_SPEC)
+}
+
+fn tokens_today(h: &Path, midnight: i64, spec: &Spec) -> Report {
+    let t0 = Instant::now();
+    let root = h.join(spec.rel_root);
+    let root_b = root.as_os_str().as_encoded_bytes().to_vec();
+    let mut found = Vec::new();
+    walk(&root, midnight, 4, spec.match_file, &mut found);
+    let t_walk = t0.elapsed();
+
+    let dir = cache_dir(h);
+    let loaded = dir.as_deref().and_then(|d| load(d, spec)).filter(|c| c.root == root_b);
+    let warm = loaded.is_some();
+    let mut c = loaded.unwrap_or_else(|| Cache::empty(&root_b, midnight));
+    let mut dirty = !warm;
+    let mut new_day = false;
+    if c.midnight != midnight {
+        new_day = true;
+        dirty = true;
+        c.midnight = midnight;
+        c.winners.clear();
+        c.nokey = [0; 4];
+        for f in &mut c.files {
+            if f.max_ts >= midnight {
+                f.reset();
+            }
+        }
+    }
+
+    let (order, todo, mut rebuild) = reconcile_files(&mut c, &found, midnight, &mut dirty);
+    let plans = prepare_plans(&mut c, &todo, midnight, &mut rebuild, &mut dirty);
+
+    let mut jobs = Vec::new();
+    let mut probe = Vec::new();
+    for (pi, p) in plans.iter().enumerate() {
+        split(&p.file, pi, p.start, p.size, &mut probe, &mut jobs);
+    }
+    let (outs, threads) = run_jobs(&plans, &jobs, midnight, spec);
+    let t_scan = t0.elapsed();
+
+    let (total, bytes) = merge_results(&mut c, &plans, &jobs, outs, &order, &mut dirty);
+    if let Some(d) = dir.as_deref() {
+        compact_cache(&mut c, &order, &mut dirty);
         if dirty {
-            save(d, spec, &c);
+            crate::system::write_private(d, spec.cache_file, &c.encode(spec.magic));
         }
     }
 
@@ -1015,6 +1068,7 @@ fn bytes_path(b: &[u8]) -> &Path {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
 
     #[test]
     fn gemini_scanner_dedupes_within_file_not_across_files_and_ignores_full_transcript() {
@@ -1027,29 +1081,20 @@ mod tests {
         fs::create_dir_all(&c2).unwrap();
 
         let lines1 = [
-            // Yesterday: excluded
             json!({"step_index": 0, "type": "PLANNER_RESPONSE", "created_at": "2025-11-19T23:59:59Z", "input_tokens": 999, "output_tokens": 999}).to_string(),
-            // Mentioning "PLANNER_RESPONSE" inside a GENERIC step: ignored
             json!({"step_index": 1, "type": "GENERIC", "created_at": "2025-11-20T01:00:00Z", "content": "\"PLANNER_RESPONSE\"", "input_tokens": 888}).to_string(),
-            // PLANNER_RESPONSE without any token fields: ignored
             json!({"step_index": 2, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:01Z", "status": "ERROR"}).to_string(),
-            // First step_index=3 wins
             json!({"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:02Z", "input_tokens": 100, "output_tokens": 40, "cache_creation_tokens": 10, "cache_read_tokens": 500}).to_string(),
-            // Duplicate step_index=3 in same file: deduped
             json!({"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:03Z", "input_tokens": 999, "output_tokens": 999}).to_string(),
-            // No step_index: never deduped
             json!({"type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:04Z", "input_tokens": 5, "output_tokens": 2}).to_string(),
             json!({"type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:05Z", "input_tokens": 5, "output_tokens": 2}).to_string(),
         ];
         fs::write(c1.join("transcript.jsonl"), lines1.join("\n") + "\n").unwrap();
-        // transcript_full.jsonl MUST be ignored
         fs::write(
             c1.join("transcript_full.jsonl"),
             json!({"step_index": 99, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T01:00:02Z", "input_tokens": 50000, "output_tokens": 50000}).to_string() + "\n",
         )
         .unwrap();
-
-        // Same step_index=3 in a different conversation file MUST NOT collide
         fs::write(
             c2.join("transcript.jsonl"),
             json!({"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T02:00:00Z", "input_tokens": 200, "output_tokens": 60, "cache_read_tokens": 300}).to_string() + "\n",
@@ -1075,6 +1120,34 @@ mod tests {
         assert!(r2.trace.contains("cache warm"), "{}", r2.trace);
         assert_eq!(r2.value["today_uncached_input"], 330);
         assert_eq!(r2.value["today_output"], 110);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn non_utf8_line_zero_recovers_after_rewrite() {
+        let dir = std::env::temp_dir().join(format!("au-utf8-recover-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let midnight = 1_763_596_800i64;
+        let c1 = dir.join(".gemini/antigravity-cli/brain/conv-1/.system_generated/logs");
+        fs::create_dir_all(&c1).unwrap();
+        let path = c1.join("transcript.jsonl");
+
+        // Invalid UTF-8 on line 0 sets offset = 0, stopped = true.
+        fs::write(&path, b"\xff\xfe\n").unwrap();
+        let r1 = gemini_tokens_today(&dir, midnight);
+        assert_eq!(r1.value["today_total"], 0);
+
+        // Replacing/rewriting the file with valid JSONL must recover and count its tokens.
+        fs::write(
+            &path,
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2025-11-20T04:00:00Z", "input_tokens": 42, "output_tokens": 8}).to_string() + "\n",
+        )
+        .unwrap();
+        let r2 = gemini_tokens_today(&dir, midnight);
+        assert_eq!(r2.value["today_uncached_input"], 42);
+        assert_eq!(r2.value["today_output"], 8);
+        assert_eq!(r2.value["today_total"], 50);
 
         fs::remove_dir_all(&dir).unwrap();
     }

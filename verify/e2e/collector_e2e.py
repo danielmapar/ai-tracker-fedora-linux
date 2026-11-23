@@ -712,6 +712,21 @@ def _(sb):
     assert "offline" in goff["usage"].get("error", ""), goff["usage"]
     eq(goff["account"]["plan"], "ultra", "account plan restored from stale usage when offline")
 
+    # Switching to a different Google account must never leak the previous account's stale limits or plan
+    sb.set_gemini_secret({
+        "token": {
+            "access_token": GEMINI_TOKEN,
+            "refresh_token": GEMINI_REFRESH,
+            "expiry": time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime(NOW + 3600)),
+        },
+        "auth_method": "consumer",
+        "id_token_email": "other-user@example.com",
+    })
+    gother = last(sb.collect("--offline")[0])["gemini"]
+    eq(gother["account"]["email"], "other-user@example.com", "switched gemini email")
+    eq(gother["account"]["plan"], None, "previous account plan not leaked on switch")
+    assert "stale" not in gother["usage"], gother["usage"]
+
 
 @test("Gemini live limits opt-out: calm 'off' marker and zero Cloud Code requests")
 def _(sb):
@@ -757,14 +772,20 @@ def _(sb):
        (False, None), "gemini daemon inactive")
 
 
-@test("signed out of Claude Code and Gemini: reported as signed out")
+@test("signed out of Claude Code and Gemini: reported as signed out without leaking stale limits")
 def _(sb):
+    sb.collect()  # populate gemini-usage-last.json first
+    sb.write(".config/ai-tracker/config.json", {"claude_live_limits": True})
+    sb.write(".cache/agent-usage/claude-usage-last.json",
+             {"windows": [{"label": "Weekly", "pct": 32.0, "resets_at": NOW + 86400}], "fetched_at": NOW - 60}, 0o600)
     os.unlink(sb.path(".claude/.credentials.json"))
     sb.set_gemini_secret(None)
     w = last(sb.collect()[0])
     eq(w["claude"]["account"]["logged_in"], False, "claude logged in")
+    assert "stale" not in w["claude"]["usage"], w["claude"]["usage"]
     eq(w["gemini"]["account"]["logged_in"], False, "gemini logged in")
     assert "Not signed in" in w["gemini"]["usage"].get("error", ""), w["gemini"]["usage"]
+    assert "stale" not in w["gemini"]["usage"], w["gemini"]["usage"]
 
 
 @test("read-only: only `systemctl show/is-active`, `journalctl` and `secret-tool lookup` reads")

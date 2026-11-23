@@ -33,7 +33,8 @@ export default class AgentUsageExtension extends Extension {
         try {
             const [, bytes] = GLib.file_get_contents(GLib.build_filenamev([this.path, 'ui-current']));
             const name = new TextDecoder().decode(bytes).trim();
-            if (/^ui-[A-Za-z0-9._-]+\.js$/.test(name))
+            if (/^ui-[A-Za-z0-9._-]+\.js$/.test(name) &&
+                GLib.file_test(GLib.build_filenamev([this.path, name]), GLib.FileTest.IS_REGULAR))
                 return name;
         } catch (_e) {
             // fall through to the default build

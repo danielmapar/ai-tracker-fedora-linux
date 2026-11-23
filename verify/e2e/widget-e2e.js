@@ -644,6 +644,12 @@ function defineTests(ext) {
         await c.show('apierror', 'gemini');
         c.expectText(/Saved numbers from \d\d:\d\d/);
         c.expectText(/^18%$/m, 'saved Gemini quota');
+        await c.show(custom('signedout-stale', 'apierror', d => {
+            d.gemini.account = {logged_in: false};
+        }), 'gemini');
+        c.expectText(/Signed out/);
+        ok(!c.has(/Saved numbers/), 'signed-out tab must not show stale rings');
+        ok(!c.has(/^Credits$/m), 'signed-out tab must not show stale credits');
     });
 
     test('Tokens', 'Codex slow: saved limits and totals stay, marked with their time', async c => {

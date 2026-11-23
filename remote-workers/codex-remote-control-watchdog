@@ -27,7 +27,9 @@ detached() { systemd-run --user --scope --quiet --collect -- "$@"; }
 # Prints the managed service's pid; fails when it is not running.
 managed_pid() {
     for p in $(pgrep -u "$ME" -f 'app-server --remote-control'); do
-        case "$(readlink -f "/proc/$p/exe" 2>/dev/null)" in "$MANAGED"*) echo "$p"; return 0 ;; esac
+        exe=$(readlink -f "/proc/$p/exe" 2>/dev/null) || continue
+        exe=${exe% (deleted)}
+        case "$exe" in "$MANAGED"*) echo "$p"; return 0 ;; esac
     done
     return 1
 }
@@ -38,6 +40,7 @@ managed_running() { managed_pid >/dev/null; }
 stray_servers() {
     for p in $(pgrep -u "$ME" -f 'app-server --listen unix://'); do
         exe=$(readlink -f "/proc/$p/exe" 2>/dev/null) || continue
+        exe=${exe% (deleted)}
         case "$exe" in
             "$MANAGED"*) ;;
             */codex) echo "$p" ;;
@@ -50,25 +53,30 @@ stray_servers() {
 # databases, read-only; prints nothing on any other outcome or error.
 held_by() {
     python3 -I - "$1" <<'PYEOF' 2>/dev/null
-import glob, os, sqlite3, sys, time
+import contextlib, glob, os, sqlite3, sys, time, urllib.parse
 pid, home = sys.argv[1], os.path.expanduser("~/.codex")
 def db(pattern):
     newest = max(glob.glob(os.path.join(home, pattern)), key=os.path.getmtime)
-    return sqlite3.connect(f"file:{newest}?mode=ro", uri=True, timeout=2)
+    uri = "file:" + urllib.parse.quote(newest, safe="/") + "?mode=ro"
+    return contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2))
 try:
-    hit = pid.isdigit() and db("logs_*.sqlite").execute(
-        "select 1 from logs where ts >= ? and process_uuid like ? and feedback_log_body like '%409 Conflict%'"
-        " and feedback_log_body like '%already online%' limit 1", (int(time.time()) - 180, f"pid:{pid}:%")).fetchone()
+    hit = False
+    if pid.isdigit():
+        with db("logs_*.sqlite") as con:
+            hit = bool(con.execute(
+                "select 1 from logs where ts >= ? and process_uuid like ? and feedback_log_body like '%409 Conflict%'"
+                " and feedback_log_body like '%already online%' limit 1", (int(time.time()) - 180, f"pid:{pid}:%")).fetchone())
 except Exception:
-    hit = None
+    hit = False
 if not hit:
     sys.exit(0)
 name = "another Codex app"
 try:
-    rows = db("state_*.sqlite").execute(
-        "select app_server_client_name from remote_control_enrollments where remote_control_enabled = 1"
-        " and app_server_client_name != '' and server_id in"
-        " (select server_id from remote_control_enrollments where app_server_client_name = '')").fetchall()
+    with db("state_*.sqlite") as con:
+        rows = con.execute(
+            "select app_server_client_name from remote_control_enrollments where remote_control_enabled = 1"
+            " and app_server_client_name != '' and server_id in"
+            " (select server_id from remote_control_enrollments where app_server_client_name = '')").fetchall()
     names = sorted({"".join(c for c in r[0] if c.isprintable())[:40] for r in rows if r[0]})
     if names:
         name = " or ".join(names)
@@ -87,7 +95,7 @@ except Exception: print("unknown")'
 if ! managed_running; then
     strays=$(stray_servers)
     if [ -n "$strays" ]; then
-        echo "unmanaged app-server ($strays) is blocking the background service; replacing it"
+        echo "unmanaged app-server (${strays//$'\n'/ }) is blocking the background service; replacing it"
         kill -TERM $strays 2>/dev/null
         sleep 2
         detached "$CODEX" app-server daemon bootstrap --remote-control >/dev/null 2>&1 || echo "bootstrap failed"
@@ -113,7 +121,8 @@ fi
 holder=$(held_by "$(managed_pid)")
 if [ -n "$holder" ]; then
     [ -f "$HELD" ] || echo "phone link held by $holder on this computer; not restarting"
-    printf '%s\n' "$holder" > "$HELD"
+    held_tmp="$HELD.$$"
+    printf '%s\n' "$holder" > "$held_tmp" && mv -f "$held_tmp" "$HELD"
     rm -f "$STATE"
     exit 0
 fi

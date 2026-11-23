@@ -2,7 +2,7 @@
 name = "agent-usage"
 version = "0.1.0"
 edition = "2021"
-description = "On-demand Claude/Codex usage and remote-access status for a GNOME top-bar widget"
+description = "On-demand Claude, Codex and Gemini usage and remote-access status for a GNOME top-bar widget"
 license = "MIT"
 repository = "https://github.com/danielmapar/ai-tracker-fedora-linux"
 rust-version = "1.88"
